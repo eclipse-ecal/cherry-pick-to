@@ -105,14 +105,19 @@ make_stubs() {
   mkdir -p "$WORK/bin-token"
   cat > "$WORK/bin-token/gh" <<'SH'
 #!/bin/bash
-# The write-access check calls `gh api ... --jq '.permissions.push'`; answer
-# it from STUB_PUSH_ALLOWED (empty means "field unavailable").
-for a in "$@"; do
-  if [ "$a" = "--jq" ]; then
-    printf '%s' "${STUB_PUSH_ALLOWED:-}"
-    exit 0
-  fi
-done
+# The write-access check probes `POST .../git/refs` with the all-zeros SHA;
+# answer it from STUB_WRITE: "denied" -> 403, "error" -> inconclusive,
+# default -> 422 (write access proven).
+case "$*" in
+  *git/refs*)
+    case "${STUB_WRITE:-ok}" in
+      denied) echo 'gh: Resource not accessible by integration (HTTP 403)' >&2 ;;
+      error)  echo 'error connecting to api.github.com' >&2 ;;
+      *)      echo 'gh: Validation Failed (HTTP 422)' >&2 ;;
+    esac
+    exit 1
+    ;;
+esac
 case "${STUB_MODE:?}" in
   expiring)
     printf 'HTTP/2.0 200 OK\r\ngithub-authentication-token-expiration: %s\r\ncontent-type: application/json\r\n\r\n{"id":1}\n' "${STUB_EXPIRY:?}"
@@ -458,22 +463,23 @@ suite_check_token() {
   assert_eq "PAT 404: exit code" "1" "$CT_RC"
   assert_contains "PAT 404: PAT permission list" "Required permissions: Actions" "$CT_OUT"
 
-  # Write-access check via .permissions.push
-  run_check_token GH_TOKEN=ghs_test STUB_MODE=no-header STUB_PUSH_ALLOWED=false
+  # Write-access probe (POST git/refs with all-zeros SHA): 403 = no write,
+  # 422 = write access proven, anything else = inconclusive (no false alarm).
+  run_check_token GH_TOKEN=ghs_test STUB_MODE=no-header STUB_WRITE=denied
   assert_eq "read-only GITHUB_TOKEN: exit code" "1" "$CT_RC"
   assert_contains "read-only GITHUB_TOKEN: permissions block advice" \
     "permissions: { contents: write" "$CT_OUT"
   assert_eq "read-only GITHUB_TOKEN: valid output" "false" "$(get_output "$CT_OUTPUTS" valid)"
 
-  run_check_token GH_TOKEN=github_pat_test STUB_MODE=no-header STUB_PUSH_ALLOWED=false
+  run_check_token GH_TOKEN=github_pat_test STUB_MODE=no-header STUB_WRITE=denied
   assert_eq "read-only PAT: exit code" "1" "$CT_RC"
   assert_contains "read-only PAT: Contents advice" "Contents (read/write)" "$CT_OUT"
 
-  run_check_token STUB_MODE=no-header STUB_PUSH_ALLOWED=true
-  assert_eq "writable token: exit code" "0" "$CT_RC"
-
   run_check_token STUB_MODE=no-header
-  assert_eq "permissions field unavailable: exit code" "0" "$CT_RC"
+  assert_eq "writable token (422 probe): exit code" "0" "$CT_RC"
+
+  run_check_token STUB_MODE=no-header STUB_WRITE=error
+  assert_eq "inconclusive probe: exit code" "0" "$CT_RC"
 }
 
 # ---------------------------------------------------------------------------

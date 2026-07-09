@@ -84,15 +84,25 @@ if [ "$gh_exit" -ne 0 ]; then
 fi
 
 # A token that can read the repository might still lack write access, which
-# would otherwise only surface much later, at the push step. The repository
-# response reports the token's effective permissions; when the field is
-# missing (empty result), no conclusion can be drawn and the check is skipped.
-push_allowed="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.permissions.push' 2> /dev/null || true)"
-if [ "$push_allowed" = "false" ]; then
-  if [ "$token_is_installation" = true ]; then
-    fail_check "The workflow's GITHUB_TOKEN has no write access to '$GITHUB_REPOSITORY' (the default is read-only). $permissions_block_advice"
-  else
-    fail_check "The cherry-pick token has no write access to '$GITHUB_REPOSITORY'. Grant the fine-grained PAT Contents (read/write) and Pull requests (read/write) on this repository."
+# would otherwise only surface much later, at the push step.
+#
+# Note: the repository response's "permissions" field cannot be used for
+# this — it reflects the authenticated USER's role, not the token's grants,
+# and reports push=false for GITHUB_TOKEN even when the workflow granted
+# contents: write. Instead, probe: creating a ref with the all-zeros SHA can
+# never succeed, but it fails with HTTP 403 when the token may not write and
+# with HTTP 422 (validation, checked after authorization) when it may.
+# Anything else is inconclusive and the check is skipped.
+if ! probe="$(gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" \
+    -f ref='refs/heads/cherry-pick-to-write-access-probe' \
+    -f sha='0000000000000000000000000000000000000000' 2>&1)"; then
+  probe_status="$(sed -n 's|.*(HTTP \([0-9]\{3\}\)).*|\1|p' <<< "$probe" | head -n 1)"
+  if [ "$probe_status" = "403" ]; then
+    if [ "$token_is_installation" = true ]; then
+      fail_check "The workflow's GITHUB_TOKEN has no write access to '$GITHUB_REPOSITORY' (the default is read-only). $permissions_block_advice"
+    else
+      fail_check "The cherry-pick token has no write access to '$GITHUB_REPOSITORY'. Grant the fine-grained PAT Contents (read/write) and Pull requests (read/write) on this repository."
+    fi
   fi
 fi
 
