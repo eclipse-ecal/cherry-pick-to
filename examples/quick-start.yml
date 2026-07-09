@@ -1,6 +1,12 @@
 # Minimal quick-start workflow for the cherry-pick-to action, using the
 # workflow's default GITHUB_TOKEN — no secret or PAT setup needed.
 #
+# One-time repository setup (Settings > Actions > General > Workflow
+# permissions): enable "Allow GitHub Actions to create and approve pull
+# requests". Creating PRs is gated by that checkbox and CANNOT be granted by
+# the permissions block below. For organization repositories the checkbox
+# may be greyed out until the same setting is enabled at organization level.
+#
 # Limitation of the default token: pull requests created by this action will
 # NOT trigger other workflows, so CI will not run on the cherry-pick PRs
 # (close and re-open a PR to run CI on it). For production use, prefer the

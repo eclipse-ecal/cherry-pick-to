@@ -252,12 +252,23 @@ EOF
     args+=(--draft)
   fi
 
-  local url
-  if ! url="$(gh pr create "${args[@]}")"; then
-    echo "::error::Could not create the pull request for '$target'."
+  # stderr captured separately: gh prints progress there, the URL to stdout.
+  local url pr_err
+  pr_err="$(mktemp)"
+  if ! url="$(gh pr create "${args[@]}" 2> "$pr_err")"; then
+    cat "$pr_err"
+    if grep -qi 'not permitted to create or approve pull requests' "$pr_err"; then
+      # Repository-level gate that the workflow permissions block CANNOT
+      # grant; it must be enabled once in the repository settings.
+      echo "::error::GitHub Actions is not permitted to create pull requests in this repository. Enable 'Allow GitHub Actions to create and approve pull requests' under Settings > Actions > General > Workflow permissions, or pass a fine-grained PAT to this action. For organization repositories the checkbox may be greyed out until the same setting is enabled at the organization level."
+    else
+      echo "::error::Could not create the pull request for '$target'."
+    fi
+    rm -f "$pr_err"
     g_outcome=error
     return
   fi
+  rm -f "$pr_err"
   echo "Created pull request: $url"
   g_url="$url"
   if [ "$cherry_pick_ok" = true ]; then

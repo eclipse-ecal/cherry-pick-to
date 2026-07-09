@@ -36,7 +36,7 @@ if [[ "${GH_TOKEN:-}" == ghs_* ]]; then
   token_is_installation=true
 fi
 
-permissions_block_advice="Grant the required permissions in the calling workflow or job: permissions: { contents: write, pull-requests: write, issues: write }."
+permissions_block_advice="Grant the required permissions in the calling workflow or job: permissions: { contents: write, pull-requests: write, issues: write }. Note that creating pull requests is additionally gated by the repository setting 'Allow GitHub Actions to create and approve pull requests' (Settings > Actions > General > Workflow permissions), which the permissions block cannot grant."
 
 fail_check() { # <message>; appends the error hint, records the output, exits
   local message="$1"

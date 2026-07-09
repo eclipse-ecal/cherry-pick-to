@@ -84,10 +84,11 @@ jobs:
 ```
 
 This runs with the workflow's default `GITHUB_TOKEN` — no secret setup
-needed, but **CI will not run on the created cherry-pick PRs** (see
-[Token](#token)). For production use, pass a fine-grained PAT instead:
-`token: ${{ secrets.CHERRY_PICK_GITHUB_TOKEN }}` (the `permissions` block is
-then not needed).
+needed, but it requires a one-time repository setting and **CI will not run
+on the created cherry-pick PRs** (see [Token](#token)). For production use,
+pass a fine-grained PAT instead:
+`token: ${{ secrets.CHERRY_PICK_GITHUB_TOKEN }}` (the `permissions` block and
+the repository setting are then not needed).
 
 The action verifies the token (see
 [Token expiry checking](#token-expiry-checking)) and then checks out the
@@ -102,9 +103,15 @@ token and `fetch-depth: 0` before calling the action.
 
 Without a `token` input, the action uses the workflow's `GITHUB_TOKEN`. No
 secret or PAT setup is needed — only the `permissions` block shown in
-[Usage](#usage) (the default workflow token is read-only). This is the
-easiest way to try the action out, and fine for repositories that don't need
-CI on the cherry-pick PRs.
+[Usage](#usage) (the default workflow token is read-only) and a **one-time
+repository setting**: under *Settings → Actions → General → Workflow
+permissions*, enable **"Allow GitHub Actions to create and approve pull
+requests"**. Creating pull requests is gated by that checkbox and *cannot*
+be granted by the workflow's `permissions` block. For repositories that
+belong to an organization, the checkbox may be greyed out until the same
+setting is enabled in the organization settings. This is the easiest way to
+try the action out, and fine for repositories that don't need CI on the
+cherry-pick PRs.
 
 **Limitation:** commits and pull requests created with `GITHUB_TOKEN` cannot
 trigger other workflows, so **CI will not run on the created cherry-pick

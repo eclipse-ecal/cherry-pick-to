@@ -167,6 +167,10 @@ case "${1:-} ${2:-}" in
     ;;
   "pr create")
     printf '%s\n' "$@" > "$STATE/pr_create_args"
+    if [ "${STUB_PR_CREATE:-ok}" = "denied" ]; then
+      echo 'pull request create failed: GraphQL: GitHub Actions is not permitted to create or approve pull requests (createPullRequest)' >&2
+      exit 1
+    fi
     echo "https://github.com/acme/widgets/pull/99"
     ;;
   "label list")
@@ -707,6 +711,17 @@ suite_cherry_pick_targets() {
   assert_eq "allowlist: exit code" "0" "$rc"
   assert_contains "allowlist: foo filtered" '{"target":"foo","outcome":"skipped-not-allowed"' "$(get_output "$of" results)"
   assert_contains "allowlist: support allowed" '{"target":"support/v1.0","outcome":"success"' "$(get_output "$of" results)"
+
+  # --- PR creation blocked by the repository's Actions settings ---
+  d="$WORK/fix-pr-denied"
+  make_standard_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' STUB_PR_CREATE=denied)"
+  rc=$?
+  assert_eq "pr-create denied: exit code" "1" "$rc"
+  assert_contains "pr-create denied: settings hint" \
+    "Allow GitHub Actions to create and approve pull requests" "$out"
+  assert_contains "pr-create denied: error outcome" '"outcome":"error"' "$(get_output "$of" results)"
 
   # --- label-creation race: create fails but label appears on re-list ---
   d="$WORK/fix-race"
