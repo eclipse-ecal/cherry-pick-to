@@ -5,6 +5,10 @@ on:
     branches: [ "main" ]
   pull_request:
 
+# The CI only reads the repository; never let it write anything.
+permissions:
+  contents: read
+
 jobs:
 
   test:
@@ -37,8 +41,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Installer and actionlint version pinned (supply chain): do not fetch
+      # and execute whatever is on the main branch.
       - name: Download actionlint
-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
 
       - name: Lint workflows and examples
         run: ./actionlint -color .github/workflows/*.yml examples/*.yml

@@ -5,6 +5,10 @@ onto release / support branches, driven by labels on the pull request.
 
 **Why this action?**
 
+- **No target-branch configuration**: any label of the form
+  `cherry-pick-to-<branch>` works out of the box — the action discovers the
+  target branches from the merged PR's labels at run time. No whitelist to
+  maintain when a new release branch is created.
 - **A pull request is always created** once a labeled PR is merged. If the
   cherry-pick succeeds, the PR is ready to review and merge; if it fails on
   conflicts, a PR (optionally a draft) is created anyway, listing the conflicting files
@@ -27,13 +31,18 @@ onto release / support branches, driven by labels on the pull request.
    `cherry-pick-to-<target-branch>` (e.g. `cherry-pick-to-support/v6.1`)
    **before it is merged**.
 2. When the PR is merged and its commits are pushed to the main branch, the
-   consuming workflow runs (once per configured target branch, via a matrix).
-3. For each target branch, this action:
-   - looks up the merged PR the pushed commits belong to,
-   - checks whether it carries the matching `cherry-pick-to-<target-branch>` label,
+   consuming workflow runs once.
+3. The action looks up the merged PR the pushed commits belong to and derives
+   the target branches from its `cherry-pick-to-*` labels — no pre-configured
+   branch list needed.
+4. For each target branch (sequentially), the action:
    - cherry-picks the pushed commit range onto a new branch
      `cherry-pick/<short-sha>/<target-branch>` created from the target branch,
    - opens a pull request against the target branch.
+
+   A hard failure on one target (e.g. the branch does not exist) does not
+   stop the remaining targets; the run fails at the end if any target had a
+   hard error.
 
 If the cherry-pick succeeds, the PR contains the cherry-picked commits and is
 labeled with the success label. If it fails (conflicts), the cherry-pick is
@@ -65,21 +74,13 @@ jobs:
   cherry-pick:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # push the cherry-pick branch
-      pull-requests: write   # create the pull request
+      contents: write        # push the cherry-pick branches
+      pull-requests: write   # create the pull requests
       issues: write          # create the success/failure labels
-    strategy:
-      fail-fast: false
-      matrix:
-        # Branches this workflow CAN cherry-pick to. A branch only receives
-        # a cherry-pick if the merged PR carries its label.
-        target-branch: [ "support/v5.13", "support/v6.0", "support/v6.1" ]
 
     steps:
-      - name: Cherry-pick to ${{ matrix.target-branch }}
+      - name: Cherry-pick to labeled target branches
         uses: eclipse-ecal/cherry-pick-to@v1
-        with:
-          target-branch: ${{ matrix.target-branch }}
 ```
 
 This runs with the workflow's default `GITHUB_TOKEN` — no secret setup
@@ -220,12 +221,12 @@ the author of a workflow when its scheduled runs fail.
 | Input            | Required | Default                       | Description |
 |------------------|----------|-------------------------------|-------------|
 | `token`          | no       | `${{ github.token }}`         | Token for checkout, pushing, and the GitHub CLI calls. The default `GITHUB_TOKEN` works but its PRs trigger no CI; use a fine-grained PAT for production (see [Token](#token)). |
-| `target-branch`  | yes      | –                             | Branch to cherry-pick onto. |
-| `label-prefix`   | no       | `cherry-pick-to-`             | The cherry-pick runs if the source PR has the label `<label-prefix><target-branch>`. |
-| `success-label`  | no       | `Auto cherry-pick success ✅` | Label put on the created PR when the cherry-pick succeeded. Created (green) if missing. |
-| `failure-label`  | no       | `Auto cherry-pick failure ⚠️` | Label put on the created PR when the cherry-pick failed. Created (red) if missing. |
+| `label-prefix`   | no       | `cherry-pick-to-`             | Labels of the form `<label-prefix><branch>` on the source PR select the target branches. |
+| `allowed-target-branches` | no | `''`                       | Optional space-separated glob patterns (e.g. `support/* release/*`) restricting which branches may be targeted via labels. Empty allows any branch. |
+| `success-label`  | no       | `Auto cherry-pick success ✅` | Label put on a created PR when the cherry-pick succeeded. Created (green) if missing. |
+| `failure-label`  | no       | `Auto cherry-pick failure ⚠️` | Label put on a created PR when the cherry-pick failed. Created (red) if missing. |
 | `use-draft-pr`   | no       | `false`                       | Create failed-cherry-pick PRs as drafts. Off by default because repositories without draft PR support (e.g. private repos on free plans) would fail to create the PR. |
-| `branch-prefix`  | no       | `cherry-pick`                 | The created branch is named `<branch-prefix>/<short-sha>/<target-branch>`. |
+| `branch-prefix`  | no       | `cherry-pick`                 | Each created branch is named `<branch-prefix>/<short-sha>/<target-branch>`. |
 | `before-commit`  | no       | `github.event.before`         | Start (exclusive) of the commit range to cherry-pick, as a full 40-char SHA. |
 | `after-commit`   | no       | `github.event.after`          | End (inclusive) of the commit range to cherry-pick, as a full 40-char SHA. |
 | `git-user-name`  | no       | pusher of the push event      | `user.name` for the cherry-picked commits. |
@@ -238,16 +239,17 @@ the author of a workflow when its scheduled runs fail.
 
 | Output                | Description |
 |-----------------------|-------------|
-| `performed`           | `true` if a cherry-pick was attempted and a PR was created, `false` if the push was skipped (no merged PR found, or no matching label). |
-| `cherry-pick-outcome` | `success` or `failure` if a cherry-pick was attempted, `skipped` otherwise. |
-| `pr-url`              | URL of the created cherry-pick pull request. Empty if skipped. |
+| `performed`           | `true` if at least one cherry-pick PR was created. |
+| `pr-urls`             | Newline-separated URLs of the created cherry-pick PRs. Empty if none. |
+| `results`             | JSON array with one entry per discovered target branch: `[{"target": "...", "outcome": "...", "pr-url": "..."}]`. Outcomes: `success`, `conflict`, `skipped-branch-exists`, `skipped-nothing-to-pick`, `skipped-not-allowed`, `error`. |
 | `source-pr-number`    | Number of the merged PR the pushed commits belong to. Empty if none was found. |
 | `token-expiration-date` | Expiration date of the token. Empty if the token does not expire. |
 
-Note: the *action* succeeds even when the *cherry-pick* fails with conflicts —
-that case is reported through the failure-labeled PR, not through a red
-workflow run. The action itself only fails on real errors (invalid inputs,
-API failures, push failures, ...).
+Note: the *action* succeeds even when a *cherry-pick* fails with conflicts —
+that case is reported through the failure-labeled PR (`conflict` outcome),
+not through a red workflow run. The action only fails on real errors
+(invalid inputs, missing target branch, API failures, push failures, ...),
+and even then only after all other targets have been processed.
 
 ## Behavior notes
 
@@ -259,13 +261,15 @@ API failures, push failures, ...).
 - Pushes that create a branch (`before` is all zeros) and force pushes
   (`before` no longer reachable, or not an ancestor of `after`) are skipped
   with a notice.
-- If the cherry-pick branch already exists on the remote — a re-run for the
-  same commits, or someone is already resolving conflicts on it — the run is
-  skipped with a notice. Delete the branch to re-run the cherry-pick.
+- If a cherry-pick branch already exists on the remote — a re-run for the
+  same commits, or someone is already resolving conflicts on it — that target
+  is skipped with a notice. Delete the branch to re-run the cherry-pick.
 - Commits whose changes already exist on the target branch are silently
   dropped (`git cherry-pick --empty=drop`). If *all* commits are dropped, no
-  pull request is created.
-- The created PR reports its result on the workflow run's summary page.
+  pull request is created for that target.
+- Targets are processed **sequentially**; a hard error on one target does not
+  stop the others (the run fails at the end instead).
+- Every target reports its result on the workflow run's summary page.
 
 ## Security
 
@@ -276,6 +280,12 @@ interpolated into script text, so they cannot inject shell commands
 ([GitHub docs on script injection](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections)).
 Branch names are additionally validated with `git check-ref-format` and may
 not start with `-`; commit SHAs must match `^[0-9a-f]{40}$`.
+
+Since the target branches come from labels, **anyone who can label pull
+requests (triage permission and up) can direct cherry-picks at any branch**.
+The result is always a pull request — nothing is merged automatically — but
+if you want to bound this, set `allowed-target-branches` (e.g. `support/*`)
+to restrict which branches labels may target.
 
 ## Development
 

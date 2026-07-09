@@ -22,26 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     # The default GITHUB_TOKEN is read-only; the action needs these grants.
     permissions:
-      contents: write        # push the cherry-pick branch
-      pull-requests: write   # create the pull request
+      contents: write        # push the cherry-pick branches
+      pull-requests: write   # create the pull requests
       issues: write          # create the success/failure labels
-    strategy:
-      # Keep cherry-picking to the other branches if one target fails.
-      fail-fast: false
-      matrix:
-        # The branches this workflow CAN cherry-pick to (one job per branch).
-        # A branch only receives a cherry-pick if the merged PR actually
-        # carries its label, e.g. "cherry-pick-to-support/v6.1" — jobs for
-        # branches without a matching label simply do nothing.
-        # Extend this list whenever a new release branch is created.
-        target-branch: [ "support/v6.0", "support/v6.1" ]
 
     steps:
-      # Checks out the repository, cherry-picks the pushed commits onto the
-      # target branch (if the merged PR carries the matching label) and opens
-      # a PR — also when the cherry-pick fails, then with manual-resolution
-      # instructions.
-      - name: Cherry-pick to ${{ matrix.target-branch }}
+      # No target-branch configuration needed: every label of the form
+      # "cherry-pick-to-<branch>" on the merged PR makes the action
+      # cherry-pick the pushed commits onto <branch> and open a PR — also
+      # when the cherry-pick fails, then with manual-resolution instructions.
+      - name: Cherry-pick to labeled target branches
         uses: eclipse-ecal/cherry-pick-to@v1
-        with:
-          target-branch: ${{ matrix.target-branch }}

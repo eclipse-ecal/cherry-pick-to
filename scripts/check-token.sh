@@ -36,6 +36,16 @@ if [[ "${GH_TOKEN:-}" == ghs_* ]]; then
   token_is_installation=true
 fi
 
+permissions_block_advice="Grant the required permissions in the calling workflow or job: permissions: { contents: write, pull-requests: write, issues: write }."
+
+fail_check() { # <message>; appends the error hint, records the output, exits
+  local message="$1"
+  [ -n "$error_hint" ] && message="$message $error_hint"
+  echo "::error::$message"
+  echo "valid=false" >> "$GITHUB_OUTPUT"
+  exit 1
+}
+
 # -i includes the response headers, which carry the token expiration date.
 set +e
 response="$(gh api -i "repos/$GITHUB_REPOSITORY" 2>&1)"
@@ -50,31 +60,27 @@ if [ -z "$http_status" ]; then
 fi
 
 if [ "$gh_exit" -ne 0 ]; then
+  echo "Response was:"
+  echo "$response"
   case "$http_status" in
     401)
       if [ "$token_is_installation" = true ]; then
-        message="The workflow's GITHUB_TOKEN was rejected (HTTP 401). This is unexpected for the default token; re-run the workflow, or pass a fine-grained PAT explicitly."
+        fail_check "The workflow's GITHUB_TOKEN was rejected (HTTP 401). This is unexpected for the default token; re-run the workflow, or pass a fine-grained PAT explicitly."
       else
-        message="The cherry-pick token is invalid or has expired (HTTP 401). Renew the fine-grained PAT and update the secret that is passed to this action. Note: an expired token also makes actions/checkout fail with \"could not read Username for 'https://github.com': terminal prompts disabled\"."
+        fail_check "The cherry-pick token is invalid or has expired (HTTP 401). Renew the fine-grained PAT and update the secret that is passed to this action. Note: an expired token also makes actions/checkout fail with \"could not read Username for 'https://github.com': terminal prompts disabled\"."
       fi
       ;;
     403|404)
       if [ "$token_is_installation" = true ]; then
-        message="The workflow's GITHUB_TOKEN has no access to '$GITHUB_REPOSITORY' (HTTP $http_status). Grant the required permissions in the calling workflow or job: permissions: { contents: write, pull-requests: write, issues: write }."
+        fail_check "The workflow's GITHUB_TOKEN has no access to '$GITHUB_REPOSITORY' (HTTP $http_status). $permissions_block_advice"
       else
-        message="The cherry-pick token was rejected for '$GITHUB_REPOSITORY' (HTTP $http_status). The token itself works, but it has no access to this repository or lacks permissions. Required permissions: Actions (read/write), Contents (read/write), Metadata (read-only), Pull requests (read/write), Workflows (read/write)."
+        fail_check "The cherry-pick token was rejected for '$GITHUB_REPOSITORY' (HTTP $http_status). The token itself works, but it has no access to this repository or lacks permissions. Required permissions: Actions (read/write), Contents (read/write), Metadata (read-only), Pull requests (read/write), Workflows (read/write)."
       fi
       ;;
     *)
-      message="Could not verify the cherry-pick token (gh exit code $gh_exit, HTTP status '${http_status:-unknown}')."
+      fail_check "Could not verify the cherry-pick token (gh exit code $gh_exit, HTTP status '${http_status:-unknown}')."
       ;;
   esac
-  [ -n "$error_hint" ] && message="$message $error_hint"
-  echo "::error::$message"
-  echo "Response was:"
-  echo "$response"
-  echo "valid=false" >> "$GITHUB_OUTPUT"
-  exit 1
 fi
 
 # A token that can read the repository might still lack write access, which
@@ -84,14 +90,10 @@ fi
 push_allowed="$(gh api "repos/$GITHUB_REPOSITORY" --jq '.permissions.push' 2> /dev/null || true)"
 if [ "$push_allowed" = "false" ]; then
   if [ "$token_is_installation" = true ]; then
-    message="The workflow's GITHUB_TOKEN has no write access to '$GITHUB_REPOSITORY' (the default is read-only). Grant the required permissions in the calling workflow or job: permissions: { contents: write, pull-requests: write, issues: write }."
+    fail_check "The workflow's GITHUB_TOKEN has no write access to '$GITHUB_REPOSITORY' (the default is read-only). $permissions_block_advice"
   else
-    message="The cherry-pick token has no write access to '$GITHUB_REPOSITORY'. Grant the fine-grained PAT Contents (read/write) and Pull requests (read/write) on this repository."
+    fail_check "The cherry-pick token has no write access to '$GITHUB_REPOSITORY'. Grant the fine-grained PAT Contents (read/write) and Pull requests (read/write) on this repository."
   fi
-  [ -n "$error_hint" ] && message="$message $error_hint"
-  echo "::error::$message"
-  echo "valid=false" >> "$GITHUB_OUTPUT"
-  exit 1
 fi
 
 echo "valid=true" >> "$GITHUB_OUTPUT"

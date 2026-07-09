@@ -1,8 +1,8 @@
 name: 'Cherry Pick To'
 description: >-
-  Cherry-pick the commits of a push onto a target branch if the merged pull
-  request that produced them carries a matching label, then open a pull
-  request with the result.
+  Cherry-pick the commits of a push onto every branch named by the merged
+  pull request's cherry-pick labels, and open one pull request per target
+  branch.
 
 branding:
   icon: git-branch
@@ -12,7 +12,7 @@ inputs:
   token:
     description: >-
       Token used for checkout, pushing, and the GitHub CLI calls (finding the
-      source PR, reading its labels, creating labels and the cherry-pick PR).
+      source PR, reading its labels, creating labels and the cherry-pick PRs).
       Defaults to the workflow's GITHUB_TOKEN, which works out of the box
       (given a permissions block with contents/pull-requests/issues write) and
       is great for trying the action out — but pull requests created with it
@@ -20,21 +20,26 @@ inputs:
       PRs. Pass a fine-grained PAT for production use.
     required: false
     default: ${{ github.token }}
-  target-branch:
-    description: 'Branch to cherry-pick onto, e.g. "support/v6.1".'
-    required: true
   label-prefix:
     description: >-
-      The cherry-pick is performed if the source pull request carries the
-      label "<label-prefix><target-branch>".
+      Labels of the form "<label-prefix><branch>" on the source pull request
+      select the branches to cherry-pick to.
     required: false
     default: 'cherry-pick-to-'
+  allowed-target-branches:
+    description: >-
+      Optional space-separated list of glob patterns (e.g. "support/*
+      release/*") restricting which branches may be targeted via labels.
+      Empty (the default) allows any branch. Use this to bound what people
+      with labeling permissions can trigger.
+    required: false
+    default: ''
   success-label:
-    description: 'Label attached to the created PR when the cherry-pick succeeded.'
+    description: 'Label attached to a created PR when the cherry-pick succeeded.'
     required: false
     default: 'Auto cherry-pick success ✅'
   failure-label:
-    description: 'Label attached to the created PR when the cherry-pick failed.'
+    description: 'Label attached to a created PR when the cherry-pick failed.'
     required: false
     default: 'Auto cherry-pick failure ⚠️'
   use-draft-pr:
@@ -46,7 +51,7 @@ inputs:
     default: 'false'
   branch-prefix:
     description: >-
-      Prefix for the created branch. The branch is named
+      Prefix for the created branches. Each branch is named
       "<branch-prefix>/<short-sha>/<target-branch>".
     required: false
     default: 'cherry-pick'
@@ -97,14 +102,17 @@ inputs:
 
 outputs:
   performed:
-    description: '"true" if a cherry-pick was attempted and a PR was created.'
-    value: ${{ steps.create-pr.outputs.performed == 'true' }}
-  cherry-pick-outcome:
-    description: '"success" or "failure" if a cherry-pick was attempted, "skipped" otherwise.'
-    value: ${{ steps.cherry-pick.outcome }}
-  pr-url:
-    description: 'URL of the created cherry-pick pull request. Empty if skipped.'
-    value: ${{ steps.create-pr.outputs.pr_url }}
+    description: '"true" if at least one cherry-pick pull request was created.'
+    value: ${{ steps.run.outputs.performed == 'true' }}
+  pr-urls:
+    description: 'Newline-separated URLs of the created cherry-pick pull requests. Empty if none.'
+    value: ${{ steps.run.outputs.pr-urls }}
+  results:
+    description: >-
+      JSON array with one entry per discovered target branch:
+      [{"target": "...", "outcome": "success|conflict|skipped-...|error",
+      "pr-url": "..."}]. Empty array if no cherry-pick label matched.
+    value: ${{ steps.run.outputs.results }}
   source-pr-number:
     description: 'Number of the merged pull request the pushed commits belong to. Empty if none was found.'
     value: ${{ steps.pr.outputs.pr_number }}
@@ -148,16 +156,14 @@ runs:
       uses: actions/checkout@v7
       with:
         # Full history: cherry-picking needs the pushed commit range and the
-        # target branch.
+        # target branches.
         fetch-depth: 0
         token: ${{ inputs.token }}
 
-    - name: Validate inputs and set up variables
+    - name: Validate the commit range
       id: setup
       shell: bash
       env:
-        TARGET_BRANCH: ${{ inputs.target-branch }}
-        BRANCH_PREFIX: ${{ inputs.branch-prefix }}
         INPUT_BEFORE: ${{ inputs.before-commit }}
         INPUT_AFTER: ${{ inputs.after-commit }}
         EVENT_BEFORE: ${{ github.event.before }}
@@ -179,19 +185,6 @@ runs:
           echo "continue=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-
-        validate_branch() {
-          if [[ "$1" == -* ]] || ! git check-ref-format "refs/heads/$1" > /dev/null; then
-            echo "::error::'$1' is not a valid branch name."
-            exit 1
-          fi
-        }
-
-        short_sha="${after:0:7}"
-        cherry_pick_branch="$BRANCH_PREFIX/$short_sha/$TARGET_BRANCH"
-
-        validate_branch "$TARGET_BRANCH"
-        validate_branch "$cherry_pick_branch"
 
         if ! git rev-parse --git-dir > /dev/null 2>&1; then
           echo "::error::No git repository found in the workspace. Keep the 'checkout' input at 'true', or check out the repository before running this action."
@@ -220,21 +213,9 @@ runs:
           exit 0
         fi
 
-        if ! git ls-remote --exit-code --heads origin "refs/heads/$TARGET_BRANCH" > /dev/null; then
-          echo "::error::Target branch '$TARGET_BRANCH' does not exist on origin."
-          exit 1
-        fi
-
-        if git ls-remote --exit-code --heads origin "refs/heads/$cherry_pick_branch" > /dev/null; then
-          echo "::notice::Branch '$cherry_pick_branch' already exists on origin (re-run of this workflow, or someone is resolving conflicts on it), skipping cherry-pick."
-          echo "continue=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
         {
           echo "before=$before"
           echo "after=$after"
-          echo "cherry_pick_branch=$cherry_pick_branch"
           echo "continue=true"
         } >> "$GITHUB_OUTPUT"
 
@@ -264,263 +245,72 @@ runs:
           } >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Check whether the pull request has the cherry-pick label
-      id: label
+    # Every label "<label-prefix><branch>" on the source PR names a target
+    # branch — no pre-configured branch list needed.
+    - name: Determine the target branches from the pull request labels
+      id: targets
       if: steps.pr.outputs.continue == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         LABEL_PREFIX: ${{ inputs.label-prefix }}
-        TARGET_BRANCH: ${{ inputs.target-branch }}
       run: |
         set -euo pipefail
 
-        wanted_label="${LABEL_PREFIX}${TARGET_BRANCH}"
         labels="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')"
         echo "Labels on PR #$PR_NUMBER:"
         printf '%s\n' "$labels"
 
-        # Exact full-line match; a substring match would let e.g.
-        # "cherry-pick-to-support/v6.13" also trigger for target "support/v6.1".
-        if grep -Fxq -- "$wanted_label" <<< "$labels"; then
-          echo "Label '$wanted_label' found, cherry-picking."
-          echo "continue=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "::notice::PR #$PR_NUMBER has no label '$wanted_label', skipping cherry-pick."
+        targets=""
+        while IFS= read -r label; do
+          if [ -n "$label" ] && [[ "$label" == "$LABEL_PREFIX"* ]]; then
+            targets+="${label#"$LABEL_PREFIX"}"$'\n'
+          fi
+        done <<< "$labels"
+
+        if [ -z "$targets" ]; then
+          echo "::notice::PR #$PR_NUMBER has no '${LABEL_PREFIX}*' label, skipping cherry-pick."
           echo "continue=false" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
-    - name: Create the cherry-pick branch
-      id: branch
-      if: steps.label.outputs.continue == 'true'
+        echo "Target branches:"
+        printf '%s' "$targets"
+
+        # Random heredoc delimiter so that label content cannot terminate the
+        # output block early and smuggle in additional outputs.
+        delimiter="OUTPUT_EOF_${RANDOM}${RANDOM}${RANDOM}"
+        {
+          echo "targets<<$delimiter"
+          printf '%s' "$targets"
+          echo "$delimiter"
+          echo "continue=true"
+        } >> "$GITHUB_OUTPUT"
+
+    # Cherry-picks to all targets sequentially; a hard failure on one target
+    # does not stop the others. Conflicts are not failures — they produce a
+    # PR with resolution instructions. The step fails at the end if any
+    # target had a hard error (missing branch, failed push, ...).
+    - name: Cherry-pick to the target branches and create pull requests
+      id: run
+      if: steps.targets.outputs.continue == 'true'
       shell: bash
       env:
-        TARGET_BRANCH: ${{ inputs.target-branch }}
-        CHERRY_PICK_BRANCH: ${{ steps.setup.outputs.cherry_pick_branch }}
+        GH_TOKEN: ${{ inputs.token }}
+        TARGETS: ${{ steps.targets.outputs.targets }}
+        BEFORE: ${{ steps.setup.outputs.before }}
+        AFTER: ${{ steps.setup.outputs.after }}
+        PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        LABEL_PREFIX: ${{ inputs.label-prefix }}
+        BRANCH_PREFIX: ${{ inputs.branch-prefix }}
+        SUCCESS_LABEL: ${{ inputs.success-label }}
+        FAILURE_LABEL: ${{ inputs.failure-label }}
+        USE_DRAFT_PR: ${{ inputs.use-draft-pr }}
+        ALLOWED_TARGET_BRANCHES: ${{ inputs.allowed-target-branches }}
         INPUT_USER_NAME: ${{ inputs.git-user-name }}
         INPUT_USER_EMAIL: ${{ inputs.git-user-email }}
         PUSHER_NAME: ${{ github.event.pusher.name }}
         PUSHER_EMAIL: ${{ github.event.pusher.email }}
       run: |
-        set -euo pipefail
-
-        git config user.name  "${INPUT_USER_NAME:-${PUSHER_NAME:-github-actions[bot]}}"
-        git config user.email "${INPUT_USER_EMAIL:-${PUSHER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}}"
-
-        # Make sure the target branch is available even if the caller
-        # restricted the checkout to the pushed branch.
-        git fetch origin "+refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH"
-        git switch --no-track -c "$CHERRY_PICK_BRANCH" "refs/remotes/origin/$TARGET_BRANCH"
-
-    - name: Cherry-pick the commits between before (exclusive) and after (inclusive)
-      id: cherry-pick
-      if: steps.label.outputs.continue == 'true'
-      continue-on-error: true
-      shell: bash
-      env:
-        BEFORE: ${{ steps.setup.outputs.before }}
-        AFTER: ${{ steps.setup.outputs.after }}
-      run: |
-        set -euo pipefail
-        # --empty=drop: skip commits whose changes already exist on the
-        # target branch instead of failing on them.
-        git cherry-pick --empty=drop "$BEFORE..$AFTER"
-
-    # A successful cherry-pick can still produce no commits at all, when
-    # every commit in the range was dropped because its changes already
-    # exist on the target branch. No PR can be created from that.
-    - name: Check whether the cherry-pick produced commits
-      id: result
-      if: steps.label.outputs.continue == 'true'
-      shell: bash
-      env:
-        TARGET_BRANCH: ${{ inputs.target-branch }}
-        CHERRY_PICK_OUTCOME: ${{ steps.cherry-pick.outcome }}
-      run: |
-        set -euo pipefail
-
-        if [ "$CHERRY_PICK_OUTCOME" = "success" ] \
-            && [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$TARGET_BRANCH")" ]; then
-          echo "::notice::All commits were dropped, their changes already exist on '$TARGET_BRANCH'. Nothing to create a PR for."
-          echo "continue=false" >> "$GITHUB_OUTPUT"
-        else
-          echo "continue=true" >> "$GITHUB_OUTPUT"
-        fi
-
-    # Runs while a failed cherry-pick is still in its conflicted state so the
-    # conflicting files can be listed in the PR description.
-    - name: Compose the pull request title and description
-      id: describe
-      if: steps.result.outputs.continue == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-        TARGET_BRANCH: ${{ inputs.target-branch }}
-        CHERRY_PICK_BRANCH: ${{ steps.setup.outputs.cherry_pick_branch }}
-        BEFORE: ${{ steps.setup.outputs.before }}
-        AFTER: ${{ steps.setup.outputs.after }}
-        CHERRY_PICK_OUTCOME: ${{ steps.cherry-pick.outcome }}
-        SUCCESS_LABEL: ${{ inputs.success-label }}
-        FAILURE_LABEL: ${{ inputs.failure-label }}
-      run: |
-        set -euo pipefail
-
-        original_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq '.title')"
-        pr_title="[CP #$PR_NUMBER > $TARGET_BRANCH] $original_pr_title"
-
-        if [ "$CHERRY_PICK_OUTCOME" = "success" ]; then
-          pr_label="$SUCCESS_LABEL"
-          pr_body="$(cat <<EOF
-        # Cherry-pick
-
-        Cherry-picked PR #$PR_NUMBER to branch \`$TARGET_BRANCH\`.
-        The cherry-pick was **successful**.
-
-        Please review the changes and **rebase-merge** if desired.
-        EOF
-          )"
-        else
-          pr_label="$FAILURE_LABEL"
-          conflict_files="$(git diff --name-only --diff-filter=U)"
-          pr_body="$(cat <<EOF
-        # Cherry-pick failed
-
-        Cherry-picked PR #$PR_NUMBER to branch \`$TARGET_BRANCH\`.
-        The cherry-pick has **failed**.
-
-        The following files have caused conflicts:
-
-        \`\`\`
-        $conflict_files
-        \`\`\`
-
-        ## Resolving
-
-        Please resolve conflicts manually. You can use this PR and branch to your convenience.
-
-        \`\`\`bash
-        git fetch origin
-        git checkout -b "local/$CHERRY_PICK_BRANCH" "origin/$TARGET_BRANCH"
-        git branch -u "origin/$CHERRY_PICK_BRANCH"
-        git cherry-pick $BEFORE..$AFTER
-
-        # Resolve conflicts and use
-        #     git cherry-pick --continue
-        # until all conflicts are resolved.
-
-        git push -f origin "HEAD:$CHERRY_PICK_BRANCH"
-        \`\`\`
-
-        After resolving all conflicts, **rebase-merge** this PR.
-        EOF
-          )"
-        fi
-
-        # Random heredoc delimiter so that PR titles or file names cannot
-        # terminate the output block early and smuggle in additional outputs.
-        delimiter="OUTPUT_EOF_${RANDOM}${RANDOM}${RANDOM}"
-        {
-          echo "pr_title<<$delimiter"
-          printf '%s\n' "$pr_title"
-          echo "$delimiter"
-          echo "pr_label<<$delimiter"
-          printf '%s\n' "$pr_label"
-          echo "$delimiter"
-          echo "pr_body<<$delimiter"
-          printf '%s\n' "$pr_body"
-          echo "$delimiter"
-        } >> "$GITHUB_OUTPUT"
-
-    - name: Abort the failed cherry-pick and create an empty commit for the PR
-      id: abort
-      if: steps.result.outputs.continue == 'true' && steps.cherry-pick.outcome == 'failure'
-      shell: bash
-      env:
-        BEFORE: ${{ steps.setup.outputs.before }}
-        AFTER: ${{ steps.setup.outputs.after }}
-      run: |
-        set -euo pipefail
-
-        git cherry-pick --abort
-
-        # Use the bot identity for the placeholder commit, it does not carry
-        # any of the pusher's work.
-        git -c user.name='github-actions[bot]' \
-            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit --allow-empty -m "Cherry-pick of $BEFORE..$AFTER failed"
-
-        git log --oneline -n 5
-
-    - name: Push the cherry-pick branch
-      id: push
-      if: steps.result.outputs.continue == 'true'
-      shell: bash
-      env:
-        CHERRY_PICK_BRANCH: ${{ steps.setup.outputs.cherry_pick_branch }}
-      run: |
-        set -euo pipefail
-        git push origin "HEAD:refs/heads/$CHERRY_PICK_BRANCH"
-
-    - name: Create the pull request
-      id: create-pr
-      if: steps.result.outputs.continue == 'true'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.token }}
-        TARGET_BRANCH: ${{ inputs.target-branch }}
-        CHERRY_PICK_BRANCH: ${{ steps.setup.outputs.cherry_pick_branch }}
-        PR_TITLE: ${{ steps.describe.outputs.pr_title }}
-        PR_BODY: ${{ steps.describe.outputs.pr_body }}
-        PR_LABEL: ${{ steps.describe.outputs.pr_label }}
-        CHERRY_PICK_OUTCOME: ${{ steps.cherry-pick.outcome }}
-        USE_DRAFT_PR: ${{ inputs.use-draft-pr }}
-      run: |
-        set -euo pipefail
-
-        if [ "$CHERRY_PICK_OUTCOME" = "success" ]; then
-          label_color="0e8a16"  # green
-        else
-          label_color="d93f0b"  # red
-        fi
-
-        # Create the label if it does not exist yet. Exact match against the
-        # full list; `gh label list | grep` would match substrings and only
-        # sees the first 30 labels.
-        existing_labels="$(gh label list --repo "$GITHUB_REPOSITORY" --limit 1000 --json name --jq '.[].name')"
-        if ! grep -Fxq -- "$PR_LABEL" <<< "$existing_labels"; then
-          if ! gh label create "$PR_LABEL" --repo "$GITHUB_REPOSITORY" --color "$label_color"; then
-            # A parallel matrix job for another target branch may have
-            # created the label in the meantime; only fail if it is still
-            # missing.
-            existing_labels="$(gh label list --repo "$GITHUB_REPOSITORY" --limit 1000 --json name --jq '.[].name')"
-            if ! grep -Fxq -- "$PR_LABEL" <<< "$existing_labels"; then
-              echo "::error::Could not create label '$PR_LABEL'."
-              exit 1
-            fi
-          fi
-        fi
-
-        args=(
-          --repo  "$GITHUB_REPOSITORY"
-          --base  "$TARGET_BRANCH"
-          --head  "$CHERRY_PICK_BRANCH"
-          --title "$PR_TITLE"
-          --body  "$PR_BODY"
-          --label "$PR_LABEL"
-        )
-        # Some repos (like personal ones) might not have the draft PR feature.
-        if [ "$CHERRY_PICK_OUTCOME" = "failure" ] && [ "$USE_DRAFT_PR" = "true" ]; then
-          args+=(--draft)
-        fi
-
-        pr_url="$(gh pr create "${args[@]}")"
-        echo "Created pull request: $pr_url"
-        {
-          echo "pr_url=$pr_url"
-          echo "performed=true"
-        } >> "$GITHUB_OUTPUT"
-
-        printf 'Cherry-pick to `%s`: **%s** — %s\n' \
-          "$TARGET_BRANCH" "$CHERRY_PICK_OUTCOME" "$pr_url" >> "$GITHUB_STEP_SUMMARY"
+        bash "$GITHUB_ACTION_PATH/scripts/cherry-pick-targets.sh"

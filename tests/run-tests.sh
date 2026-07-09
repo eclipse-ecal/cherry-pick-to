@@ -48,7 +48,7 @@ mkdir -p "$STEPS"
 
 extract_steps() {
   local id
-  for id in setup pr label branch cherry-pick result describe abort push create-pr; do
+  for id in setup pr targets; do
     if ! python3 "$ROOT/tests/extract-step.py" "$ROOT/action.yml" "$id" > "$STEPS/$id.sh"; then
       echo "FATAL: could not extract step '$id' from action.yml" >&2
       exit 1
@@ -56,7 +56,7 @@ extract_steps() {
   done
 }
 
-run_step() { # <workdir> <step-script> [KEY=VALUE ...]; stdout+stderr combined
+run_step() { # <workdir> <script> [KEY=VALUE ...]; stdout+stderr combined
   local workdir="$1" script="$2"
   shift 2
   (cd "$workdir" && env "$@" bash "$script" 2>&1)
@@ -76,6 +76,24 @@ get_block_output() { # <output-file> <key>  (heredoc-style multiline outputs)
     on && $0 == delim { exit }
     on { print }
   ' "$1"
+}
+
+get_pr_arg() { # <state-dir> <flag>  (value of a flag in the last gh pr create)
+  awk -v flag="$2" 'found { print; exit } $0 == flag { found = 1 }' "$1/pr_create_args"
+}
+
+assert_pr_flag() { # <description> <present|absent> <state-dir> <flag>
+  # The flag must be its own argument (own line in the dump); a PR title
+  # merely containing the flag text must not count.
+  local found=absent
+  if grep -Fxq -- "$4" "$3/pr_create_args"; then
+    found=present
+  fi
+  if [ "$found" = "$2" ]; then
+    pass "$1"
+  else
+    fail "$1 — flag '$4' $found in gh pr create args, expected $2"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -143,6 +161,7 @@ case "${1:-} ${2:-}" in
     if [ -n "$jq_expr" ]; then printf '%s' "${STUB_PR_JSON:?}" | jq -r "$jq_expr"; else printf '%s' "${STUB_PR_JSON:?}"; fi
     ;;
   "pr create")
+    printf '%s\n' "$@" > "$STATE/pr_create_args"
     echo "https://github.com/acme/widgets/pull/99"
     ;;
   "label list")
@@ -217,6 +236,15 @@ make_conflict_fixture() { # standard fixture + conflicting commit on support/v1.
   git -C "$c" switch -q main
 }
 
+make_multi_fixture() { # standard fixture + conflicting branch support/v2.0
+  make_standard_fixture "$1"
+  local c="$1/clone"
+  git -C "$c" switch -qc support/v2.0 "$FIX_BASE"
+  commit_file "$c" file.txt "conflicting change on v2.0" "conflicting change"
+  git -C "$c" push -q origin support/v2.0
+  git -C "$c" switch -q main
+}
+
 make_dropped_fixture() { # the single pushed commit already exists on support/v1.0
   local c="$1/clone"
   make_repo "$1"
@@ -231,12 +259,32 @@ make_dropped_fixture() { # the single pushed commit already exists on support/v1
   FIX_AFTER="$(git -C "$c" rev-parse main)"
 }
 
-run_setup() { # <clone> <output-file> <target-branch> <before> <after>
+run_setup() { # <workdir> <output-file> <before> <after>
   run_step "$1" "$STEPS/setup.sh" \
-    TARGET_BRANCH="$3" BRANCH_PREFIX="cherry-pick" \
     INPUT_BEFORE="" INPUT_AFTER="" \
-    EVENT_BEFORE="$4" EVENT_AFTER="$5" \
+    EVENT_BEFORE="$3" EVENT_AFTER="$4" \
     GITHUB_OUTPUT="$2"
+}
+
+# shellcheck disable=SC2016 # deliberately NOT expanded: hostile input fixture
+HOSTILE_TITLE='Fix `rm -rf` handling; $(touch PWNED) '"'"';--draft'
+HOSTILE_TITLE_JSON="{\"title\": \"$HOSTILE_TITLE\"}"
+
+run_targets() { # <clone> <state> <output-file> <summary-file> <targets> [KEY=VALUE ...]
+  local clone="$1" state="$2" of="$3" summary="$4" targets="$5"
+  shift 5
+  run_step "$clone" "$ROOT/scripts/cherry-pick-targets.sh" \
+    PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
+    GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets \
+    GITHUB_OUTPUT="$of" GITHUB_STEP_SUMMARY="$summary" \
+    TARGETS="$targets" BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" \
+    PR_NUMBER=42 LABEL_PREFIX=cherry-pick-to- BRANCH_PREFIX=cherry-pick \
+    SUCCESS_LABEL="Auto success" FAILURE_LABEL="Auto failure" \
+    USE_DRAFT_PR=false ALLOWED_TARGET_BRANCHES="" \
+    INPUT_USER_NAME="" INPUT_USER_EMAIL="" \
+    PUSHER_NAME="Push Er" PUSHER_EMAIL="pusher@example.com" \
+    STUB_PR_JSON="$HOSTILE_TITLE_JSON" \
+    "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -272,8 +320,7 @@ for f in files:
 doc = yaml.safe_load(open(f"{root}/action.yml"))
 steps = doc["runs"]["steps"]
 ids = [s.get("id") for s in steps]
-expected = ["check-token", None, "setup", "pr", "label", "branch",
-            "cherry-pick", "result", "describe", "abort", "push", "create-pr"]
+expected = ["check-token", None, "setup", "pr", "targets", "run"]
 assert ids == expected, f"unexpected step chain: {ids}"
 
 checkout = steps[1]
@@ -282,20 +329,21 @@ assert checkout["if"] == "inputs.checkout == 'true'"
 assert checkout["with"]["fetch-depth"] == 0
 assert checkout["with"]["token"] == "${{ inputs.token }}"
 
-assert steps[7]["if"] == "steps.label.outputs.continue == 'true'"      # result
-assert steps[8]["if"] == "steps.result.outputs.continue == 'true'"     # describe
-assert "steps.result.outputs.continue == 'true'" in steps[9]["if"]     # abort
-assert "steps.cherry-pick.outcome == 'failure'" in steps[9]["if"]
-assert steps[10]["if"] == "steps.result.outputs.continue == 'true'"    # push
-assert steps[11]["if"] == "steps.result.outputs.continue == 'true'"    # create-pr
+assert steps[3]["if"] == "steps.setup.outputs.continue == 'true'"    # pr
+assert steps[4]["if"] == "steps.pr.outputs.continue == 'true'"       # targets
+assert steps[5]["if"] == "steps.targets.outputs.continue == 'true'"  # run
 
-token = doc["inputs"]["token"]
-assert token["required"] is False
-assert token["default"] == "${{ github.token }}"
+inputs = doc["inputs"]
+assert "target-branch" not in inputs, "target-branch input must be gone"
+assert inputs["allowed-target-branches"]["default"] == ""
+assert inputs["token"]["required"] is False
+assert inputs["token"]["default"] == "${{ github.token }}"
 
-example = open(f"{root}/examples/cherry-pick-to.yml").read()
-assert "actions/checkout" not in example
-assert example.count("uses:") == 1
+for f in ["examples/cherry-pick-to.yml", "examples/quick-start.yml"]:
+    text = open(f"{root}/{f}").read()
+    assert "matrix" not in text, f"{f} must not use a matrix"
+    assert "target-branch:" not in text, f"{f} must not configure target branches"
+    assert "actions/checkout" not in text
 
 qs = yaml.safe_load(open(f"{root}/examples/quick-start.yml"))
 qs_job = next(iter(qs["jobs"].values()))
@@ -303,7 +351,7 @@ perms = qs_job["permissions"]
 assert perms["contents"] == "write"
 assert perms["pull-requests"] == "write"
 assert perms["issues"] == "write"
-qs_with = qs_job["steps"][-1].get("with", {})
+qs_with = qs_job["steps"][-1].get("with") or {}
 assert "token" not in qs_with, "quick-start must not pass a token"
 
 print("all checks passed")
@@ -315,7 +363,7 @@ PY
   fi
 
   local script
-  for script in "$ROOT/scripts/check-token.sh" "$ROOT/tests/run-tests.sh"; do
+  for script in "$ROOT"/scripts/*.sh "$ROOT/tests/run-tests.sh"; do
     if bash -n "$script" 2> /dev/null; then
       pass "bash -n $(basename "$script")"
     else
@@ -429,11 +477,11 @@ suite_check_token() {
 }
 
 # ---------------------------------------------------------------------------
-# Suite: pr + label steps (gh stub with real jq)
+# Suite: pr + targets steps (gh stub with real jq)
 # ---------------------------------------------------------------------------
 
-suite_pr_label() {
-  echo "== pr and label steps =="
+suite_pr_targets() {
+  echo "== pr and targets steps =="
 
   local state out of
   state="$(new_stub_state)"
@@ -453,22 +501,25 @@ suite_pr_label() {
     STUB_API_JSON='[]' > /dev/null
   assert_eq "pr step: no merged PR -> skip" "false" "$(get_output "$of" continue)"
 
-  local labels_json='{"labels":[{"name":"cherry-pick-to-support/v6.13"},{"name":"bug"}]}'
+  local labels_json='{"labels":[{"name":"cherry-pick-to-support/v6.1"},{"name":"bug"},{"name":"cherry-pick-to-foo"},{"name":"not-cherry-pick-to-bar"}]}'
   of="$(new_output_file)"
-  out="$(run_step "$WORK" "$STEPS/label.sh" PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
+  run_step "$WORK" "$STEPS/targets.sh" PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
     GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets GITHUB_OUTPUT="$of" \
-    PR_NUMBER=42 LABEL_PREFIX=cherry-pick-to- TARGET_BRANCH=support/v6.1 \
-    STUB_PR_JSON="$labels_json")"
-  assert_eq "label step: near-miss label does not match" "false" "$(get_output "$of" continue)"
-  assert_contains "label step: skip notice" "::notice::" "$out"
-
-  labels_json='{"labels":[{"name":"cherry-pick-to-support/v6.1"},{"name":"bug"}]}'
-  of="$(new_output_file)"
-  run_step "$WORK" "$STEPS/label.sh" PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
-    GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets GITHUB_OUTPUT="$of" \
-    PR_NUMBER=42 LABEL_PREFIX=cherry-pick-to- TARGET_BRANCH=support/v6.1 \
+    PR_NUMBER=42 LABEL_PREFIX=cherry-pick-to- \
     STUB_PR_JSON="$labels_json" > /dev/null
-  assert_eq "label step: exact label matches" "true" "$(get_output "$of" continue)"
+  assert_eq "targets step: extracts all prefixed labels" \
+    "support/v6.1
+foo" "$(get_block_output "$of" targets)"
+  assert_eq "targets step: continue" "true" "$(get_output "$of" continue)"
+
+  labels_json='{"labels":[{"name":"bug"},{"name":"enhancement"}]}'
+  of="$(new_output_file)"
+  out="$(run_step "$WORK" "$STEPS/targets.sh" PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
+    GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets GITHUB_OUTPUT="$of" \
+    PR_NUMBER=42 LABEL_PREFIX=cherry-pick-to- \
+    STUB_PR_JSON="$labels_json")"
+  assert_eq "targets step: no matching label -> skip" "false" "$(get_output "$of" continue)"
+  assert_contains "targets step: skip notice" "::notice::" "$out"
 }
 
 # ---------------------------------------------------------------------------
@@ -483,23 +534,10 @@ suite_setup() {
   clone="$d/clone"
 
   of="$(new_output_file)"
-  run_setup "$clone" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER" > /dev/null
+  run_setup "$clone" "$of" "$FIX_BASE" "$FIX_AFTER" > /dev/null
   assert_eq "valid range: continue" "true" "$(get_output "$of" continue)"
-  assert_eq "valid range: branch name" "cherry-pick/${FIX_AFTER:0:7}/support/v1.0" \
-    "$(get_output "$of" cherry_pick_branch)"
-
-  of="$(new_output_file)"
-  out="$(run_setup "$clone" "$of" support/does-not-exist "$FIX_BASE" "$FIX_AFTER")"
-  rc=$?
-  assert_eq "missing target branch: exit code" "1" "$rc"
-  assert_contains "missing target branch: error" "does not exist on origin" "$out"
-
-  git -C "$clone" push -q origin "main:refs/heads/cherry-pick/${FIX_AFTER:0:7}/support/v1.0"
-  of="$(new_output_file)"
-  out="$(run_setup "$clone" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER")"
-  assert_eq "pre-existing cherry-pick branch: skip" "false" "$(get_output "$of" continue)"
-  assert_contains "pre-existing cherry-pick branch: notice" "already exists on origin" "$out"
-  git -C "$clone" push -q origin ":refs/heads/cherry-pick/${FIX_AFTER:0:7}/support/v1.0"
+  assert_eq "valid range: before output" "$FIX_BASE" "$(get_output "$of" before)"
+  assert_eq "valid range: after output" "$FIX_AFTER" "$(get_output "$of" after)"
 
   git -C "$clone" switch -qc side "$FIX_BASE"
   commit_file "$clone" side.txt "side" "side commit"
@@ -507,243 +545,180 @@ suite_setup() {
   side_sha="$(git -C "$clone" rev-parse side)"
   git -C "$clone" switch -q main
   of="$(new_output_file)"
-  out="$(run_setup "$clone" "$of" support/v1.0 "$side_sha" "$FIX_AFTER")"
+  out="$(run_setup "$clone" "$of" "$side_sha" "$FIX_AFTER")"
   assert_eq "non-ancestor range (force push): skip" "false" "$(get_output "$of" continue)"
   assert_contains "non-ancestor range: notice" "not an ancestor" "$out"
 
   of="$(new_output_file)"
-  out="$(run_setup "$clone" "$of" support/v1.0 \
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$FIX_AFTER")"
+  out="$(run_setup "$clone" "$of" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "$FIX_AFTER")"
   assert_eq "unknown commit in full clone: skip" "false" "$(get_output "$of" continue)"
   assert_contains "unknown commit: force-push notice" "not reachable anymore" "$out"
 
   of="$(new_output_file)"
-  out="$(run_setup "$clone" "$of" support/v1.0 \
-    "0000000000000000000000000000000000000000" "$FIX_AFTER")"
+  run_setup "$clone" "$of" "0000000000000000000000000000000000000000" "$FIX_AFTER" > /dev/null
   assert_eq "new-branch push: skip" "false" "$(get_output "$of" continue)"
 
-  local bad
-  for bad in "-evil" "a..b" "a b" 'a[b]'; do
-    of="$(new_output_file)"
-    run_setup "$clone" "$of" "$bad" "$FIX_BASE" "$FIX_AFTER" > /dev/null
-    assert_eq "invalid branch name '$bad': exit code" "1" "$?"
-  done
-
   of="$(new_output_file)"
-  run_setup "$clone" "$of" support/v1.0 '$(evil)' "$FIX_AFTER" > /dev/null
+  # shellcheck disable=SC2016 # deliberately NOT expanded: hostile input fixture
+  run_setup "$clone" "$of" '$(evil)' "$FIX_AFTER" > /dev/null
   assert_eq "invalid SHA: exit code" "1" "$?"
 
   mkdir -p "$WORK/empty"
   of="$(new_output_file)"
-  out="$(run_setup "$WORK/empty" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER")"
+  out="$(run_setup "$WORK/empty" "$of" "$FIX_BASE" "$FIX_AFTER")"
   rc=$?
   assert_eq "no repository: exit code" "1" "$rc"
   assert_contains "no repository: error" "No git repository found" "$out"
 }
 
 # ---------------------------------------------------------------------------
-# Suite: full flow on fixture repositories
+# Suite: scripts/cherry-pick-targets.sh against fixture repositories
 # ---------------------------------------------------------------------------
 
-HOSTILE_TITLE='Fix `rm -rf` handling; $(touch PWNED) '"'"';--draft'
+suite_cherry_pick_targets() {
+  echo "== cherry-pick-targets.sh =="
 
-suite_flow_happy() {
-  echo "== flow: successful cherry-pick =="
+  local d clone state of summary out rc cpb short
 
-  local d="$WORK/fix-happy" clone of rc out state cpb
+  # --- single clean target ---
+  d="$WORK/fix-happy"
   make_standard_fixture "$d"
   clone="$d/clone"
-  state="$(new_stub_state)"
-
-  of="$(new_output_file)"
-  run_setup "$clone" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER" > /dev/null
-  cpb="$(get_output "$of" cherry_pick_branch)"
-
-  run_step "$clone" "$STEPS/branch.sh" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_BRANCH="$cpb" \
-    INPUT_USER_NAME="" INPUT_USER_EMAIL="" \
-    PUSHER_NAME="Push Er" PUSHER_EMAIL="pusher@example.com" > /dev/null
-  assert_eq "branch step: on cherry-pick branch" "$cpb" \
-    "$(git -C "$clone" rev-parse --abbrev-ref HEAD)"
-  assert_eq "branch step: pusher identity" "Push Er" "$(git -C "$clone" config user.name)"
-
-  run_step "$clone" "$STEPS/cherry-pick.sh" BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" > /dev/null
-  assert_eq "cherry-pick step: exit code" "0" "$?"
-  assert_eq "cherry-pick step: file content picked" "change 1" "$(cat "$clone/file.txt")"
-
-  of="$(new_output_file)"
-  run_step "$clone" "$STEPS/result.sh" GITHUB_OUTPUT="$of" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_OUTCOME=success > /dev/null
-  assert_eq "result step: continue after real pick" "true" "$(get_output "$of" continue)"
-
-  of="$(new_output_file)"
-  run_step "$clone" "$STEPS/describe.sh" \
-    PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
-    GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets GITHUB_OUTPUT="$of" \
-    PR_NUMBER=42 TARGET_BRANCH=support/v1.0 CHERRY_PICK_BRANCH="$cpb" \
-    BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" CHERRY_PICK_OUTCOME=success \
-    SUCCESS_LABEL="Auto cherry-pick success" FAILURE_LABEL="Auto cherry-pick failure" \
-    STUB_PR_JSON="{\"title\": \"$HOSTILE_TITLE\"}" > /dev/null
-  assert_eq "describe step: hostile title passed through as data" \
-    "[CP #42 > support/v1.0] $HOSTILE_TITLE" "$(get_block_output "$of" pr_title)"
-  assert_contains "describe step: success body" "**successful**" "$(get_block_output "$of" pr_body)"
-  assert_eq "describe step: success label" "Auto cherry-pick success" "$(get_block_output "$of" pr_label)"
-  if [ -e "$clone/PWNED" ] || [ -e "PWNED" ]; then
-    fail "describe step: hostile title executed a command"
-  else
-    pass "describe step: no injection side effects"
-  fi
-
-  run_step "$clone" "$STEPS/push.sh" CHERRY_PICK_BRANCH="$cpb" > /dev/null
-  assert_eq "push step: exit code" "0" "$?"
+  short="${FIX_AFTER:0:7}"
+  cpb="cherry-pick/$short/support/v1.0"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$clone" "$state" "$of" "$summary" $'support/v1.0\n')"
+  rc=$?
+  assert_eq "happy: exit code" "0" "$rc"
+  assert_eq "happy: performed" "true" "$(get_output "$of" performed)"
+  assert_contains "happy: pr-urls" "pull/99" "$(get_block_output "$of" pr-urls)"
+  assert_contains "happy: results JSON" \
+    '{"target":"support/v1.0","outcome":"success","pr-url":"https://github.com/acme/widgets/pull/99"}' \
+    "$(get_output "$of" results)"
   if git -C "$d/origin.git" rev-parse -q --verify "refs/heads/$cpb" > /dev/null; then
-    pass "push step: branch exists on origin"
+    pass "happy: branch pushed to origin"
   else
-    fail "push step: branch missing on origin"
+    fail "happy: branch missing on origin"
+  fi
+  assert_eq "happy: picked file content" "change 1" \
+    "$(git -C "$d/origin.git" show "refs/heads/$cpb:file.txt" | tr -d '\n')"
+  assert_eq "happy: hostile title as one argument" \
+    "[CP #42 > support/v1.0] $HOSTILE_TITLE" "$(get_pr_arg "$state" --title)"
+  assert_pr_flag "happy: no --draft" absent "$state" --draft
+  assert_contains "happy: green label color" "0e8a16" "$(cat "$state/log")"
+  assert_contains "happy: summary line" "support/v1.0" "$(cat "$summary")"
+  if [ -e "$clone/PWNED" ] || [ -e "PWNED" ]; then
+    fail "happy: hostile title executed a command"
+  else
+    pass "happy: no injection side effects"
   fi
 
-  # A re-run of setup must now skip because the branch exists remotely.
-  of="$(new_output_file)"
-  run_setup "$clone" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER" > /dev/null
-  assert_eq "setup re-run after push: skip" "false" "$(get_output "$of" continue)"
-}
+  # --- re-run on the same fixture: remote branch exists -> skip ---
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$clone" "$state" "$of" "$summary" $'support/v1.0\n')"
+  rc=$?
+  assert_eq "re-run: exit code" "0" "$rc"
+  assert_eq "re-run: performed" "false" "$(get_output "$of" performed)"
+  assert_contains "re-run: skipped outcome" '"outcome":"skipped-branch-exists"' "$(get_output "$of" results)"
 
-suite_flow_conflict() {
-  echo "== flow: conflicting cherry-pick =="
-
-  local d="$WORK/fix-conflict" clone of rc state cpb body
+  # --- conflicting target, draft on ---
+  d="$WORK/fix-conflict"
   make_conflict_fixture "$d"
   clone="$d/clone"
-  state="$(new_stub_state)"
-
-  of="$(new_output_file)"
-  run_setup "$clone" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER" > /dev/null
-  cpb="$(get_output "$of" cherry_pick_branch)"
-
-  run_step "$clone" "$STEPS/branch.sh" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_BRANCH="$cpb" \
-    INPUT_USER_NAME="" INPUT_USER_EMAIL="" \
-    PUSHER_NAME="Push Er" PUSHER_EMAIL="pusher@example.com" > /dev/null
-
-  run_step "$clone" "$STEPS/cherry-pick.sh" BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" > /dev/null
+  short="${FIX_AFTER:0:7}"
+  cpb="cherry-pick/$short/support/v1.0"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$clone" "$state" "$of" "$summary" $'support/v1.0\n' USE_DRAFT_PR=true)"
   rc=$?
-  if [ "$rc" -ne 0 ]; then pass "cherry-pick step: fails on conflict"; else fail "cherry-pick step: expected conflict failure"; fi
+  assert_eq "conflict: exit code" "0" "$rc"
+  assert_contains "conflict: outcome" '"outcome":"conflict"' "$(get_output "$of" results)"
+  assert_pr_flag "conflict: --draft used" present "$state" --draft
+  assert_contains "conflict: red label color" "d93f0b" "$(cat "$state/log")"
+  assert_contains "conflict: conflicting file listed" "file.txt" "$(cat "$state/pr_create_args")"
+  assert_contains "conflict: placeholder commit" "failed" \
+    "$(git -C "$d/origin.git" log -1 --format=%s "refs/heads/$cpb")"
+  assert_eq "conflict: clean working tree afterwards" "" "$(git -C "$clone" status --porcelain)"
 
-  of="$(new_output_file)"
-  run_step "$clone" "$STEPS/result.sh" GITHUB_OUTPUT="$of" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_OUTCOME=failure > /dev/null
-  assert_eq "result step: continue on failure" "true" "$(get_output "$of" continue)"
-
-  of="$(new_output_file)"
-  run_step "$clone" "$STEPS/describe.sh" \
-    PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
-    GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets GITHUB_OUTPUT="$of" \
-    PR_NUMBER=42 TARGET_BRANCH=support/v1.0 CHERRY_PICK_BRANCH="$cpb" \
-    BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" CHERRY_PICK_OUTCOME=failure \
-    SUCCESS_LABEL="ok" FAILURE_LABEL="Auto cherry-pick failure" \
-    STUB_PR_JSON='{"title": "some feature"}' > /dev/null
-  body="$(get_block_output "$of" pr_body)"
-  assert_contains "describe step: conflict file listed" "file.txt" "$body"
-  assert_contains "describe step: resolve instructions" "git cherry-pick $FIX_BASE..$FIX_AFTER" "$body"
-  assert_eq "describe step: failure label" "Auto cherry-pick failure" "$(get_block_output "$of" pr_label)"
-
-  run_step "$clone" "$STEPS/abort.sh" BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" > /dev/null
-  assert_eq "abort step: exit code" "0" "$?"
-  assert_contains "abort step: placeholder commit" "failed" \
-    "$(git -C "$clone" log -1 --format=%s)"
-  assert_eq "abort step: clean working tree" "" "$(git -C "$clone" status --porcelain)"
-
-  run_step "$clone" "$STEPS/push.sh" CHERRY_PICK_BRANCH="$cpb" > /dev/null
-  assert_eq "push step after conflict: exit code" "0" "$?"
-}
-
-suite_flow_dropped() {
-  echo "== flow: all commits dropped =="
-
-  local d="$WORK/fix-dropped" clone of out cpb
-  make_dropped_fixture "$d"
-  clone="$d/clone"
-
-  of="$(new_output_file)"
-  run_setup "$clone" "$of" support/v1.0 "$FIX_BASE" "$FIX_AFTER" > /dev/null
-  cpb="$(get_output "$of" cherry_pick_branch)"
-
-  run_step "$clone" "$STEPS/branch.sh" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_BRANCH="$cpb" \
-    INPUT_USER_NAME="" INPUT_USER_EMAIL="" \
-    PUSHER_NAME="Push Er" PUSHER_EMAIL="pusher@example.com" > /dev/null
-
-  run_step "$clone" "$STEPS/cherry-pick.sh" BEFORE="$FIX_BASE" AFTER="$FIX_AFTER" > /dev/null
-  assert_eq "cherry-pick step: succeeds by dropping" "0" "$?"
-
-  of="$(new_output_file)"
-  out="$(run_step "$clone" "$STEPS/result.sh" GITHUB_OUTPUT="$of" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_OUTCOME=success)"
-  assert_eq "result step: skip when nothing picked" "false" "$(get_output "$of" continue)"
-  assert_contains "result step: notice" "already exist" "$out"
-}
-
-# ---------------------------------------------------------------------------
-# Suite: create-pr step (gh stub, no git needed)
-# ---------------------------------------------------------------------------
-
-run_create_pr() { # <state> <output-file> <summary-file> [KEY=VALUE ...]
-  local state="$1" of="$2" summary="$3"
-  shift 3
-  run_step "$WORK" "$STEPS/create-pr.sh" \
-    PATH="$WORK/bin-gh:$PATH" STUB_STATE="$state" \
-    GH_TOKEN=dummy GITHUB_REPOSITORY=acme/widgets \
-    GITHUB_OUTPUT="$of" GITHUB_STEP_SUMMARY="$summary" \
-    TARGET_BRANCH=support/v1.0 CHERRY_PICK_BRANCH=cherry-pick/abc1234/support/v1.0 \
-    PR_TITLE="[CP #42 > support/v1.0] some feature" \
-    PR_BODY="body" PR_LABEL="Auto label" \
-    "$@"
-}
-
-suite_create_pr() {
-  echo "== create-pr step =="
-
-  local state of summary rc log
-
+  # --- conflicting target, draft off (default) ---
+  d="$WORK/fix-conflict2"
+  make_conflict_fixture "$d"
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
-  run_create_pr "$state" "$of" "$summary" CHERRY_PICK_OUTCOME=success USE_DRAFT_PR=true > /dev/null
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' > /dev/null
+  assert_pr_flag "conflict without draft: no --draft" absent "$state" --draft
+
+  # --- all commits dropped (needs git >= 2.45 for cherry-pick --empty) ---
+  # `git <cmd> -h` exits 129 even on success; grep the captured text.
+  if grep -q -- '--empty' <<< "$(git cherry-pick -h 2>&1 || true)"; then
+    d="$WORK/fix-dropped"
+    make_dropped_fixture "$d"
+    state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+    out="$(run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n')"
+    rc=$?
+    assert_eq "dropped: exit code" "0" "$rc"
+    assert_eq "dropped: performed" "false" "$(get_output "$of" performed)"
+    assert_contains "dropped: outcome" '"outcome":"skipped-nothing-to-pick"' "$(get_output "$of" results)"
+    assert_not_contains "dropped: no PR created" "pr create" "$(cat "$state/log")"
+  else
+    skip_suite "dropped-commits scenario (git >= 2.45 required)"
+  fi
+
+  # --- multiple targets: clean + conflict + missing branch ---
+  d="$WORK/fix-multi"
+  make_multi_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$d/clone" "$state" "$of" "$summary" \
+    $'support/v1.0\nsupport/v2.0\nsupport/nope\n')"
   rc=$?
-  log="$(cat "$state/log")"
-  assert_eq "success: exit code" "0" "$rc"
-  assert_eq "success: pr_url output" "https://github.com/acme/widgets/pull/99" "$(get_output "$of" pr_url)"
-  assert_eq "success: performed output" "true" "$(get_output "$of" performed)"
-  assert_not_contains "success: no --draft" "--draft" "$log"
-  assert_contains "success: green label color" "0e8a16" "$log"
-  assert_contains "success: step summary written" "pull/99" "$(cat "$summary")"
+  assert_eq "multi: exit code (hard error present)" "1" "$rc"
+  local results
+  results="$(get_output "$of" results)"
+  assert_contains "multi: v1.0 success" '{"target":"support/v1.0","outcome":"success"' "$results"
+  assert_contains "multi: v2.0 conflict" '{"target":"support/v2.0","outcome":"conflict"' "$results"
+  assert_contains "multi: nope error" '{"target":"support/nope","outcome":"error"' "$results"
+  assert_eq "multi: two PRs created" "2" "$(grep -c 'pr create' "$state/log")"
+  assert_eq "multi: performed" "true" "$(get_output "$of" performed)"
+  assert_eq "multi: two pr-urls" "2" "$(get_block_output "$of" pr-urls | grep -c 'pull/99')"
+  assert_contains "multi: missing-branch error message" "does not exist on origin" "$out"
 
+  # --- invalid label suffix does not stop a valid target ---
+  d="$WORK/fix-invalid"
+  make_standard_fixture "$d"
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
-  run_create_pr "$state" "$of" "$summary" CHERRY_PICK_OUTCOME=failure USE_DRAFT_PR=true > /dev/null
-  log="$(cat "$state/log")"
-  assert_contains "failure: --draft used" "--draft" "$log"
-  assert_contains "failure: red label color" "d93f0b" "$log"
+  out="$(run_targets "$d/clone" "$state" "$of" "$summary" $'-evil\nsupport/v1.0\n')"
+  rc=$?
+  assert_eq "invalid target: exit code" "1" "$rc"
+  assert_contains "invalid target: error outcome" '{"target":"-evil","outcome":"error"' "$(get_output "$of" results)"
+  assert_contains "invalid target: valid target still succeeds" \
+    '{"target":"support/v1.0","outcome":"success"' "$(get_output "$of" results)"
 
+  # --- allowed-target-branches filter ---
+  d="$WORK/fix-allowed"
+  make_standard_fixture "$d"
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
-  run_create_pr "$state" "$of" "$summary" CHERRY_PICK_OUTCOME=failure USE_DRAFT_PR=false > /dev/null
-  assert_not_contains "failure without draft input: no --draft" "--draft" "$(grep 'pr create' "$state/log")"
+  out="$(run_targets "$d/clone" "$state" "$of" "$summary" $'foo\nsupport/v1.0\n' \
+    ALLOWED_TARGET_BRANCHES='support/*')"
+  rc=$?
+  assert_eq "allowlist: exit code" "0" "$rc"
+  assert_contains "allowlist: foo filtered" '{"target":"foo","outcome":"skipped-not-allowed"' "$(get_output "$of" results)"
+  assert_contains "allowlist: support allowed" '{"target":"support/v1.0","outcome":"success"' "$(get_output "$of" results)"
 
-  # Label already exists: no create call.
+  # --- label-creation race: create fails but label appears on re-list ---
+  d="$WORK/fix-race"
+  make_standard_fixture "$d"
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
-  run_create_pr "$state" "$of" "$summary" CHERRY_PICK_OUTCOME=success USE_DRAFT_PR=true \
-    STUB_LABELS=$'Auto label\n' > /dev/null
-  assert_not_contains "existing label: no label create" "label create" "$(cat "$state/log")"
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
+    STUB_LABEL_CREATE_RC=1 STUB_LABELS_SECOND=$'Auto success\n' > /dev/null
+  assert_eq "label race: exit code" "0" "$?"
+  assert_contains "label race: PR still created" '"outcome":"success"' "$(get_output "$of" results)"
 
-  # Race: create fails, but a parallel job created the label in the meantime.
+  # --- label creation fails for real ---
+  d="$WORK/fix-race2"
+  make_standard_fixture "$d"
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
-  run_create_pr "$state" "$of" "$summary" CHERRY_PICK_OUTCOME=success USE_DRAFT_PR=true \
-    STUB_LABEL_CREATE_RC=1 STUB_LABELS_SECOND=$'Auto label\n' > /dev/null
-  assert_eq "label race: run still succeeds" "0" "$?"
-  assert_eq "label race: PR created" "true" "$(get_output "$of" performed)"
-
-  # Create fails and the label is really missing: hard error.
-  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
-  run_create_pr "$state" "$of" "$summary" CHERRY_PICK_OUTCOME=success USE_DRAFT_PR=true \
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
     STUB_LABEL_CREATE_RC=1 > /dev/null
-  assert_eq "label create failure: exit code" "1" "$?"
+  assert_eq "label failure: exit code" "1" "$?"
+  assert_contains "label failure: error outcome" '"outcome":"error"' "$(get_output "$of" results)"
 }
 
 # ---------------------------------------------------------------------------
@@ -756,19 +731,16 @@ main() {
 
   suite_syntax
   suite_check_token
-  suite_create_pr
 
   if command -v jq > /dev/null; then
-    suite_pr_label
+    suite_pr_targets
   else
-    skip_suite "pr/label step suite (jq not available)"
+    skip_suite "pr/targets step suite (jq not available)"
   fi
 
   if command -v git > /dev/null && command -v jq > /dev/null; then
     suite_setup
-    suite_flow_happy
-    suite_flow_conflict
-    suite_flow_dropped
+    suite_cherry_pick_targets
   else
     skip_suite "fixture suites (git and jq required)"
   fi
