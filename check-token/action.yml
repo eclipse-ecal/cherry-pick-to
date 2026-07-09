@@ -1,0 +1,46 @@
+name: 'Cherry Pick To — Check Token'
+description: >-
+  Verify that the cherry-pick token is valid and warn when it is about to
+  expire. Run this BEFORE actions/checkout: checkout is the first step to
+  fail (with a cryptic "could not read Username" error) when the token has
+  expired, and this action needs no checkout.
+
+branding:
+  icon: key
+  color: red
+
+inputs:
+  token:
+    description: 'The token to check, i.e. the same token that is passed to the cherry-pick-to action.'
+    required: true
+  warning-days:
+    description: 'Emit a workflow warning when the token expires within this many days.'
+    required: false
+    default: '14'
+  error-hint:
+    description: >-
+      Extra text appended to error and warning messages, e.g. a link to your
+      token renewal runbook or helpdesk ticket.
+    required: false
+    default: ''
+
+outputs:
+  expiration-date:
+    description: 'Expiration date of the token. Empty if the token does not expire.'
+    value: ${{ steps.check.outputs.expiration-date }}
+  days-until-expiration:
+    description: 'Whole days until the token expires. Empty if the token does not expire.'
+    value: ${{ steps.check.outputs.days-until-expiration }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check token validity and expiration
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        WARNING_DAYS: ${{ inputs.warning-days }}
+        ERROR_HINT: ${{ inputs.error-hint }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../scripts/check-token.sh"

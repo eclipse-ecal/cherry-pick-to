@@ -1,0 +1,75 @@
+# Production example workflow for a repository consuming the cherry-pick-to
+# action, using a fine-grained PAT so that CI runs on the created PRs.
+# For a zero-setup variant using the default GITHUB_TOKEN, see quick-start.yml.
+# Place this at .github/workflows/cherry-pick-to.yml in the consuming repo.
+
+name: Cherry-pick to release branches
+
+# Run on every push to the default branch — that includes the push GitHub
+# creates when a pull request is merged. The action itself then decides
+# whether anything needs to be cherry-picked.
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  cherry-pick:
+    runs-on: ubuntu-latest
+    strategy:
+      # Keep cherry-picking to the other branches if one target fails.
+      fail-fast: false
+      matrix:
+        # The branches this workflow CAN cherry-pick to (one job per branch).
+        # A branch only receives a cherry-pick if the merged PR actually
+        # carries its label, e.g. "cherry-pick-to-support/v6.1" — jobs for
+        # branches without a matching label simply do nothing.
+        # Extend this list whenever a new release branch is created.
+        target-branch: [ "support/v5.13", "support/v6.0", "support/v6.1" ]
+
+    steps:
+
+      # The action checks the token, checks out the repository, cherry-picks
+      # the pushed commits onto the target branch (if the merged PR carries
+      # the label "cherry-pick-to-<target-branch>") and opens a PR — also
+      # when the cherry-pick fails, then with manual-resolution instructions.
+      #
+      # It needs a specific fine-grained access token with more permissions.
+      # We cannot use the generic GITHUB_TOKEN (i.e. the GitHub Bot), as
+      # commits and PRs created by that bot cannot trigger workflow runs.
+      #
+      # The token must be renewed every year. The action fails with a clear
+      # error when the token has expired and warns ahead of time when it is
+      # about to expire.
+      #
+      # Mandatory Token Permissions:
+      #   Actions:       Read and write
+      #   Contents:      Read and write
+      #   Metadata:      Read-only
+      #   Pull requests: Read and write
+      #   Workflows:     Read and write
+      #
+      - name: Cherry-pick to ${{ matrix.target-branch }}
+        id: cherry-pick
+        uses: eclipse-ecal/cherry-pick-to@v1
+        with:
+          token: ${{ secrets.CHERRY_PICK_GITHUB_TOKEN }}
+          target-branch: ${{ matrix.target-branch }}
+          # Optional parameters (defaults shown):
+          # label-prefix: 'cherry-pick-to-'
+          # success-label: 'Auto cherry-pick success ✅'
+          # failure-label: 'Auto cherry-pick failure ⚠️'
+          # use-draft-pr: 'false'
+          # branch-prefix: 'cherry-pick'
+          # checkout: 'true'
+          # token-expiry-warning-days: '14'
+          # error-hint: 'Renewal runbook: https://example.com/renew-cherry-pick-token'
+
+      # Optional: the action exposes outputs (performed, pr-url,
+      # cherry-pick-outcome, source-pr-number) for follow-up steps, e.g. for
+      # notifications.
+      - name: Print result
+        if: steps.cherry-pick.outputs.performed == 'true'
+        run: echo "Created $PR_URL (cherry-pick $OUTCOME)"
+        env:
+          PR_URL: ${{ steps.cherry-pick.outputs.pr-url }}
+          OUTCOME: ${{ steps.cherry-pick.outputs.cherry-pick-outcome }}

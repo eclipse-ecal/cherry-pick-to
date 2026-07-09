@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Run tests
+        run: bash tests/run-tests.sh
+        env:
+          # On CI every suite must run; skipping (missing git/jq) is a failure.
+          REQUIRE_ALL: '1'
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh tests/*.sh
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Lint workflows and examples
+        run: ./actionlint -color .github/workflows/*.yml examples/*.yml
