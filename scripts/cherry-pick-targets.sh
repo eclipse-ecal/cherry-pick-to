@@ -87,6 +87,10 @@ validate_branch() { # <name>; returns non-zero for invalid branch names
   [[ "$1" != -* ]] && git check-ref-format "refs/heads/$1" > /dev/null 2>&1
 }
 
+is_merge_commit() { # <sha>
+  git rev-parse -q --verify "$1^2" > /dev/null
+}
+
 # Labels already ensured in this run; avoids re-listing per target.
 ensured_labels=""
 
@@ -175,19 +179,30 @@ process_target() { # <target>
     return
   fi
 
-  local cherry_pick_ok=true conflict_files=""
-  if ! git cherry-pick "${cherry_pick_opts[@]}" "$BEFORE..$AFTER"; then
-    cherry_pick_ok=false
-    # Capture the conflicting files while the conflict state still exists,
-    # then reset to a clean branch and add an empty commit so a PR can be
-    # created from it. The bot identity is used for the placeholder commit,
-    # it does not carry any of the pusher's work.
-    conflict_files="$(git diff --name-only --diff-filter=U)"
-    git cherry-pick --abort 2> /dev/null || git reset -q --hard "refs/remotes/origin/$target"
-    git -c user.name='github-actions[bot]' \
-        -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-        commit --allow-empty -m "Cherry-pick of $BEFORE..$AFTER failed"
-  fi
+  # Walk the range one commit at a time: merge commits need -m 1 (pick the
+  # full diff against the first parent as one combined commit), which a
+  # plain range cherry-pick cannot express.
+  local cherry_pick_ok=true conflict_files="" commit
+  local -a pick_opts
+  for commit in "${range_commits[@]}"; do
+    pick_opts=("${cherry_pick_opts[@]}")
+    is_merge_commit "$commit" && pick_opts+=(-m 1)
+    if ! git cherry-pick "${pick_opts[@]}" "$commit"; then
+      cherry_pick_ok=false
+      # Capture the conflicting files while the conflict state still exists,
+      # then reset to a clean branch (the abort only undoes the failed pick,
+      # not commits picked earlier in the walk) and add an empty commit so a
+      # PR can be created from it. The bot identity is used for the
+      # placeholder commit, it does not carry any of the pusher's work.
+      conflict_files="$(git diff --name-only --diff-filter=U)"
+      git cherry-pick --abort 2> /dev/null
+      git reset -q --hard "refs/remotes/origin/$target"
+      git -c user.name='github-actions[bot]' \
+          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+          commit --allow-empty -m "Cherry-pick of $BEFORE..$AFTER failed"
+      break
+    fi
+  done
 
   if [ "$cherry_pick_ok" = true ] \
       && [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/remotes/origin/$target")" ]; then
@@ -241,7 +256,7 @@ Please resolve conflicts manually. You can use this PR and branch to your conven
 git fetch origin
 git checkout -b "local/$cherry_pick_branch" "origin/$target"
 git branch -u "origin/$cherry_pick_branch"
-git cherry-pick $BEFORE..$AFTER
+$manual_pick_commands
 
 # Resolve conflicts and use
 #     git cherry-pick --continue
@@ -316,6 +331,33 @@ fi
 
 git config user.name  "${INPUT_USER_NAME:-${PUSHER_NAME:-github-actions[bot]}}"
 git config user.email "${INPUT_USER_EMAIL:-${PUSHER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}}"
+
+# The pushed range is picked along its first-parent line, one commit at a
+# time. For squash and rebase merges that is exactly the pushed commits; a
+# merge commit is picked with -m 1, so its full diff against the main branch
+# lands as one combined commit (see "Merge strategies" in the README).
+if ! range_list="$(git rev-list --reverse --first-parent "$BEFORE..$AFTER")"; then
+  echo "::error::Could not list the commits of $BEFORE..$AFTER."
+  exit 1
+fi
+range_commits=()
+[ -n "$range_list" ] && mapfile -t range_commits <<< "$range_list"
+
+# Copy-paste commands for the conflict PR bodies, mirroring the walk above.
+# The compact range form only works for linear history; when the range
+# contains merge commits, list every pick explicitly.
+manual_pick_commands="git cherry-pick $BEFORE..$AFTER"
+if [ -n "$(git rev-list --first-parent --merges "$BEFORE..$AFTER")" ]; then
+  manual_pick_commands=""
+  for commit in "${range_commits[@]}"; do
+    if is_merge_commit "$commit"; then
+      manual_pick_commands+="git cherry-pick -m 1 $commit"$'\n'
+    else
+      manual_pick_commands+="git cherry-pick $commit"$'\n'
+    fi
+  done
+  manual_pick_commands="${manual_pick_commands%$'\n'}"
+fi
 
 if ! original_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq '.title')"; then
   echo "::error::Could not read the title of PR #$PR_NUMBER."

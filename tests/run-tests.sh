@@ -254,6 +254,31 @@ make_multi_fixture() { # standard fixture + conflicting branch support/v2.0
   git -C "$c" switch -q main
 }
 
+make_merge_fixture() { # main = base + direct commit + --no-ff merge of a 2-commit feature branch
+  local c="$1/clone"
+  make_repo "$1"
+  commit_file "$c" file.txt "base" "base"
+  git -C "$c" branch support/v1.0
+  git -C "$c" switch -qc feature
+  commit_file "$c" feat-a.txt "feature part 1" "feat 1"
+  commit_file "$c" feat-b.txt "feature part 2" "feat 2"
+  git -C "$c" switch -q main
+  commit_file "$c" other.txt "direct" "direct change"
+  git -C "$c" merge -q --no-ff feature -m "Merge pull request #42 from acme/feature"
+  git -C "$c" push -q origin main support/v1.0
+  FIX_BASE="$(git -C "$c" rev-parse main~2)"
+  FIX_AFTER="$(git -C "$c" rev-parse main)"
+}
+
+make_merge_conflict_fixture() { # merge fixture + conflicting commit on support/v1.0
+  make_merge_fixture "$1"
+  local c="$1/clone"
+  git -C "$c" switch -q support/v1.0
+  commit_file "$c" feat-a.txt "conflicting change on support" "conflicting change"
+  git -C "$c" push -q origin support/v1.0
+  git -C "$c" switch -q main
+}
+
 make_dropped_fixture() { # the single pushed commit already exists on support/v1.0
   local c="$1/clone"
   make_repo "$1"
@@ -653,6 +678,8 @@ suite_cherry_pick_targets() {
   assert_pr_flag "conflict: --draft used" present "$state" --draft
   assert_contains "conflict: red label color" "d93f0b" "$(cat "$state/log")"
   assert_contains "conflict: conflicting file listed" "file.txt" "$(cat "$state/pr_create_args")"
+  assert_contains "conflict: compact range instructions for linear history" \
+    "git cherry-pick $FIX_BASE..$FIX_AFTER" "$(cat "$state/pr_create_args")"
   assert_contains "conflict: placeholder commit" "failed" \
     "$(git -C "$d/origin.git" log -1 --format=%s "refs/heads/$cpb")"
   assert_eq "conflict: clean working tree afterwards" "" "$(git -C "$clone" status --porcelain)"
@@ -663,6 +690,56 @@ suite_cherry_pick_targets() {
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
   run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' > /dev/null
   assert_pr_flag "conflict without draft: no --draft" absent "$state" --draft
+
+  # --- merge commit in the range: picked with -m 1 as one combined commit ---
+  d="$WORK/fix-merge"
+  make_merge_fixture "$d"
+  clone="$d/clone"
+  short="${FIX_AFTER:0:7}"
+  cpb="cherry-pick/$short/support/v1.0"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$clone" "$state" "$of" "$summary" $'support/v1.0\n')"
+  rc=$?
+  assert_eq "merge: exit code" "0" "$rc"
+  assert_contains "merge: success outcome" '"outcome":"success"' "$(get_output "$of" results)"
+  assert_eq "merge: all merged files present" "feature part 1" \
+    "$(git -C "$d/origin.git" show "refs/heads/$cpb:feat-a.txt" | tr -d '\n')"
+  assert_eq "merge: direct commit present" "direct" \
+    "$(git -C "$d/origin.git" show "refs/heads/$cpb:other.txt" | tr -d '\n')"
+  # first-parent walk: the direct commit + the merge as ONE combined commit
+  assert_eq "merge: combined commit count" "2" \
+    "$(git -C "$d/origin.git" rev-list --count "refs/heads/$cpb" "^refs/heads/support/v1.0")"
+  assert_contains "merge: combined commit keeps the merge message" "Merge pull request #42" \
+    "$(git -C "$d/origin.git" log -1 --format=%s "refs/heads/$cpb")"
+
+  # --- merge commit conflicting on the target ---
+  d="$WORK/fix-merge-conflict"
+  make_merge_conflict_fixture "$d"
+  clone="$d/clone"
+  short="${FIX_AFTER:0:7}"
+  cpb="cherry-pick/$short/support/v1.0"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  out="$(run_targets "$clone" "$state" "$of" "$summary" $'support/v1.0\n')"
+  rc=$?
+  assert_eq "merge conflict: exit code" "0" "$rc"
+  assert_contains "merge conflict: outcome" '"outcome":"conflict"' "$(get_output "$of" results)"
+  assert_contains "merge conflict: conflicting file listed" "feat-a.txt" "$(cat "$state/pr_create_args")"
+  # The manual instructions must mirror the walk: plain pick for the direct
+  # commit, -m 1 for the merge — the compact range form would fail.
+  assert_contains "merge conflict: -m 1 in instructions" \
+    "git cherry-pick -m 1 $FIX_AFTER" "$(cat "$state/pr_create_args")"
+  assert_contains "merge conflict: plain pick for the direct commit" \
+    "git cherry-pick $(git -C "$clone" rev-parse main~1)" "$(cat "$state/pr_create_args")"
+  assert_not_contains "merge conflict: no range form in instructions" \
+    "git cherry-pick $FIX_BASE..$FIX_AFTER" "$(cat "$state/pr_create_args")"
+  # The direct commit picked before the conflict must not survive on the
+  # pushed branch: only the placeholder commit sits on top of the target.
+  assert_eq "merge conflict: only the placeholder commit on the branch" "1" \
+    "$(git -C "$d/origin.git" rev-list --count "refs/heads/$cpb" "^refs/heads/support/v1.0")"
+  assert_contains "merge conflict: placeholder commit" "failed" \
+    "$(git -C "$d/origin.git" log -1 --format=%s "refs/heads/$cpb")"
+  assert_eq "merge conflict: clean working tree afterwards" "" \
+    "$(git -C "$clone" status --porcelain)"
 
   # --- all commits dropped (needs git >= 2.45 for cherry-pick --empty) ---
   # `git <cmd> -h` exits 129 even on success; grep the captured text.

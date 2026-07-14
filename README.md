@@ -6,10 +6,11 @@ onto release / support branches, driven by labels on the pull request.
 **Why this action?**
 
 - **From pull request to pull request.** Label a PR
-  `cherry-pick-to-<branch>`, and when it merges (squash or rebase alike) a
-  review-ready PR appears on each target branch. The action **never commits
-  or merges to your release branches directly** — every backport goes
-  through the same review and merge process as any other change.
+  `cherry-pick-to-<branch>`, and when it merges (squash, rebase, or merge
+  commit — see [Merge strategies](#merge-strategies)) a review-ready PR
+  appears on each target branch. The action **never commits or merges to
+  your release branches directly** — every backport goes through the same
+  review and merge process as any other change.
 - **A cherry-pick is never forgotten.** Even when it fails on conflicts, a
   PR is still created (optionally as a draft): labeled as failed, listing
   the conflicting files, with copy-paste instructions for resolving them on
@@ -36,7 +37,9 @@ onto release / support branches, driven by labels on the pull request.
    branch list needed.
 4. For each target branch (sequentially), the action:
    - cherry-picks the pushed commit range onto a new branch
-     `cherry-pick/<short-sha>/<target-branch>` created from the target branch,
+     `cherry-pick/<short-sha>/<target-branch>` created from the target branch
+     (commit by commit along the first-parent line; merge commits are picked
+     with `-m 1` — see [Merge strategies](#merge-strategies)),
    - opens a pull request against the target branch.
 
    A hard failure on one target (e.g. the branch does not exist) does not
@@ -55,6 +58,29 @@ created by the merge, so adding a label afterwards does not trigger it again.
 However, the labels are read live when the action runs — so you can add the
 label after the fact and simply **re-run the merge commit's workflow run**
 from the *Actions* tab; the re-run will then pick the label up.
+
+## Merge strategies
+
+**Squash merges and rebase merges are the recommended strategies**: the
+pushed commits are exactly the pull request's changes and are cherry-picked
+onto the target branch one-to-one.
+
+**Merge commits are handled too, with limitations.** A merge commit cannot
+be cherry-picked as-is — it has two parents, so there is no single
+well-defined "change". The action therefore picks it with
+`git cherry-pick -m 1`, which applies the merge's full diff against the main
+branch as **one combined commit** on the target branch. That reproduces
+exactly what landed on the main branch, including any conflict resolutions
+made in the merge itself, but:
+
+- the pull request's individual commits are not preserved on the target
+  branch — the result is equivalent to a squash, and
+- the combined commit carries the merge commit's message (e.g.
+  *"Merge pull request #123 from ..."*).
+
+When a merge commit conflicts, the failure PR's copy-paste instructions list
+the exact `git cherry-pick -m 1 <sha>` commands instead of the usual
+compact range form.
 
 ## Usage
 
