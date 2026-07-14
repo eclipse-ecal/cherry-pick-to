@@ -46,19 +46,54 @@ jobs:
         uses: eclipse-ecal/cherry-pick-to@v1
         with:
           token: ${{ secrets.CHERRY_PICK_GITHUB_TOKEN }}
-          # Optional parameters (defaults shown):
+
+          # All optional parameters, with their defaults:
+
+          # Labels "<label-prefix><branch>" on the merged PR select the
+          # target branches.
           # label-prefix: 'cherry-pick-to-'
+
+          # Space-separated glob patterns restricting which branches may be
+          # targeted via labels; empty allows any branch.
           # allowed-target-branches: ''   # e.g. 'support/* release/*'
+
+          # Labels put on the created PRs (created in the repo if missing).
           # success-label: 'Auto cherry-pick success ✅'
           # failure-label: 'Auto cherry-pick failure ⚠️'
+
+          # Open failed-cherry-pick PRs as drafts. Keep off for repositories
+          # without draft PR support (e.g. private repos on free plans).
           # use-draft-pr: 'false'
+
+          # Created branches are named "<branch-prefix>/<short-sha>/<target>".
           # branch-prefix: 'cherry-pick'
+
+          # Commit range to cherry-pick (full 40-char SHAs). Defaults to the
+          # push event's range; only set these when triggering differently.
+          # before-commit: ''
+          # after-commit: ''
+
+          # Author identity for the cherry-picked commits. Defaults to the
+          # pusher of the triggering push event.
+          # git-user-name: ''
+          # git-user-email: ''
+
+          # Set to 'false' to manage the checkout in the calling workflow
+          # (then check out with the same token and fetch-depth: 0 yourself).
           # checkout: 'true'
+
+          # Warn this many days before the token expires...
           # token-expiry-warning-days: '14'
-          # error-hint: 'Renewal runbook: https://example.com/renew-cherry-pick-token'
+          # ...and also put that warning into the body of every created PR,
+          # where reviewers see it (off by default).
+          # token-expiry-warning-in-pr-body: 'false'
+
+          # Extra text appended to token error/warning messages.
+          # error-hint: ''   # e.g. 'Renewal runbook: https://example.com/renew-cherry-pick-token'
 
       # Optional: the action exposes outputs (performed, pr-urls, results,
-      # source-pr-number) for follow-up steps, e.g. for notifications.
+      # source-pr-number, token-expiration-date) for follow-up steps, e.g.
+      # for notifications.
       - name: Print result
         if: steps.cherry-pick.outputs.performed == 'true'
         run: printf 'Created pull requests:\n%s\n' "$PR_URLS"
