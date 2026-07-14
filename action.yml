@@ -93,6 +93,15 @@ inputs:
     description: 'Emit a workflow warning when the token expires within this many days.'
     required: false
     default: '14'
+  token-expiry-warning-in-pr-body:
+    description: >-
+      Also append the token expiry warning to the body of every pull request
+      this action creates while the token expires within
+      token-expiry-warning-days days. Disabled by default. Has no effect with
+      the default GITHUB_TOKEN, which is ephemeral by design and therefore
+      never expiry-checked.
+    required: false
+    default: 'false'
   error-hint:
     description: >-
       Extra text appended to token error and warning messages, e.g. a link to
@@ -312,5 +321,10 @@ runs:
         INPUT_USER_EMAIL: ${{ inputs.git-user-email }}
         PUSHER_NAME: ${{ github.event.pusher.name }}
         PUSHER_EMAIL: ${{ github.event.pusher.email }}
+        EXPIRY_WARNING_IN_PR_BODY: ${{ inputs.token-expiry-warning-in-pr-body }}
+        WARNING_DAYS: ${{ inputs.token-expiry-warning-days }}
+        TOKEN_EXPIRATION_DATE: ${{ steps.check-token.outputs.expiration-date }}
+        TOKEN_DAYS_LEFT: ${{ steps.check-token.outputs.days-until-expiration }}
+        ERROR_HINT: ${{ inputs.error-hint }}
       run: |
         bash "$GITHUB_ACTION_PATH/scripts/cherry-pick-targets.sh"

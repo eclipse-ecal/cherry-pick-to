@@ -347,6 +347,13 @@ assert "target-branch" not in inputs, "target-branch input must be gone"
 assert inputs["allowed-target-branches"]["default"] == ""
 assert inputs["token"]["required"] is False
 assert inputs["token"]["default"] == "${{ github.token }}"
+assert inputs["token-expiry-warning-in-pr-body"]["default"] == "false"
+
+run_env = steps[5]["env"]
+assert run_env["EXPIRY_WARNING_IN_PR_BODY"] == "${{ inputs.token-expiry-warning-in-pr-body }}"
+assert run_env["TOKEN_EXPIRATION_DATE"] == "${{ steps.check-token.outputs.expiration-date }}"
+assert run_env["TOKEN_DAYS_LEFT"] == "${{ steps.check-token.outputs.days-until-expiration }}"
+assert run_env["WARNING_DAYS"] == "${{ inputs.token-expiry-warning-days }}"
 
 for f in ["examples/cherry-pick-to.yml", "examples/quick-start.yml"]:
     text = open(f"{root}/{f}").read()
@@ -622,6 +629,7 @@ suite_cherry_pick_targets() {
   else
     pass "happy: no injection side effects"
   fi
+  assert_not_contains "happy: no expiry warning in PR body" "[!WARNING]" "$(cat "$state/pr_create_args")"
 
   # --- re-run on the same fixture: remote branch exists -> skip ---
   state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
@@ -711,6 +719,58 @@ suite_cherry_pick_targets() {
   assert_eq "allowlist: exit code" "0" "$rc"
   assert_contains "allowlist: foo filtered" '{"target":"foo","outcome":"skipped-not-allowed"' "$(get_output "$of" results)"
   assert_contains "allowlist: support allowed" '{"target":"support/v1.0","outcome":"success"' "$(get_output "$of" results)"
+
+  # --- token expiry warning in the PR body (opt-in) ---
+  # The body is a multiline argument, so assert against the full argument
+  # dump; the warning text appears nowhere else in it.
+  d="$WORK/fix-expiry-note"
+  make_standard_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
+    EXPIRY_WARNING_IN_PR_BODY=true WARNING_DAYS=14 \
+    TOKEN_EXPIRATION_DATE='2026-08-01 10:00:00 UTC' TOKEN_DAYS_LEFT=5 \
+    ERROR_HINT='Renewal: https://example.com/renew' > /dev/null
+  local pr_args
+  pr_args="$(cat "$state/pr_create_args")"
+  assert_contains "expiry note: warning in PR body" "> [!WARNING]" "$pr_args"
+  assert_contains "expiry note: date and days included" \
+    "expires on 2026-08-01 10:00:00 UTC (5 days from now)" "$pr_args"
+  assert_contains "expiry note: hint included" "https://example.com/renew" "$pr_args"
+
+  # Also on conflict PRs.
+  d="$WORK/fix-expiry-conflict"
+  make_conflict_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
+    EXPIRY_WARNING_IN_PR_BODY=true WARNING_DAYS=14 \
+    TOKEN_EXPIRATION_DATE='2026-08-01 10:00:00 UTC' TOKEN_DAYS_LEFT=5 > /dev/null
+  assert_contains "expiry note: also on conflict PR" "> [!WARNING]" "$(cat "$state/pr_create_args")"
+
+  # Disabled by default: no warning even with expiry data present.
+  d="$WORK/fix-expiry-default-off"
+  make_standard_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
+    WARNING_DAYS=14 TOKEN_EXPIRATION_DATE='2026-08-01 10:00:00 UTC' TOKEN_DAYS_LEFT=5 > /dev/null
+  assert_not_contains "expiry note: off by default" "[!WARNING]" "$(cat "$state/pr_create_args")"
+
+  # Enabled but not expiring soon.
+  d="$WORK/fix-expiry-far"
+  make_standard_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
+    EXPIRY_WARNING_IN_PR_BODY=true WARNING_DAYS=14 \
+    TOKEN_EXPIRATION_DATE='2027-05-01 10:00:00 UTC' TOKEN_DAYS_LEFT=300 > /dev/null
+  assert_not_contains "expiry note: none when far from expiry" "[!WARNING]" "$(cat "$state/pr_create_args")"
+
+  # Enabled but the token has no expiration (empty outputs, e.g. GITHUB_TOKEN).
+  d="$WORK/fix-expiry-none"
+  make_standard_fixture "$d"
+  state="$(new_stub_state)"; of="$(new_output_file)"; summary="$(new_output_file)"
+  run_targets "$d/clone" "$state" "$of" "$summary" $'support/v1.0\n' \
+    EXPIRY_WARNING_IN_PR_BODY=true WARNING_DAYS=14 \
+    TOKEN_EXPIRATION_DATE='' TOKEN_DAYS_LEFT='' > /dev/null
+  assert_not_contains "expiry note: none for non-expiring token" "[!WARNING]" "$(cat "$state/pr_create_args")"
 
   # --- PR creation blocked by the repository's Actions settings ---
   d="$WORK/fix-pr-denied"

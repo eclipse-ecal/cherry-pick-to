@@ -164,6 +164,10 @@ The very first step of the action verifies the token against the repository,
   on every push while everything still works. (GitHub reports the expiration
   date of an expiring token in the `github-authentication-token-expiration`
   header of every API response; fine-grained PATs always have one.)
+  Workflow warnings are easy to miss if nobody opens the run page — set
+  `token-expiry-warning-in-pr-body: 'true'` to additionally put the warning
+  into the body of every pull request the action creates during that period,
+  where reviewers will see it. Disabled by default.
 
 - **Token lacking write access** (e.g. a read-only default `GITHUB_TOKEN`
   without the `permissions` block) → the run fails immediately with the fix,
@@ -240,6 +244,7 @@ the author of a workflow when its scheduled runs fail.
 | `git-user-email` | no       | pusher of the push event      | `user.email` for the cherry-picked commits. |
 | `checkout`       | no       | `true`                        | Whether the action checks out the repository itself (full history, using `token`). Set to `false` to manage the checkout in the calling workflow. |
 | `token-expiry-warning-days` | no | `14`                     | Emit a workflow warning when the token expires within this many days. |
+| `token-expiry-warning-in-pr-body` | no | `false`            | Also append the token expiry warning to the body of every created PR while the token expires within `token-expiry-warning-days` days. No effect with the default `GITHUB_TOKEN`. |
 | `error-hint`     | no       | `''`                          | Extra text appended to token error/warning messages, e.g. a link to your renewal runbook. |
 
 ## Outputs

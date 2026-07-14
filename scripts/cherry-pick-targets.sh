@@ -21,6 +21,12 @@
 #   USE_DRAFT_PR             "true": open conflict PRs as drafts
 #   ALLOWED_TARGET_BRANCHES  optional space-separated glob patterns; empty = all
 #   INPUT_USER_NAME, INPUT_USER_EMAIL, PUSHER_NAME, PUSHER_EMAIL
+#   EXPIRY_WARNING_IN_PR_BODY  "true": append the token expiry warning to PR bodies
+#   WARNING_DAYS             expiry warning threshold in days (default: 14)
+#   TOKEN_EXPIRATION_DATE, TOKEN_DAYS_LEFT
+#                            token expiry as reported by check-token.sh; empty
+#                            for non-expiring tokens and the default GITHUB_TOKEN
+#   ERROR_HINT               optional extra text appended to the expiry warning
 #   GH_TOKEN, GITHUB_REPOSITORY, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY
 #
 # Outputs (GITHUB_OUTPUT): performed, pr-urls, results (JSON array)
@@ -28,6 +34,19 @@
 set -uo pipefail
 
 short_sha="${AFTER:0:7}"
+
+# Optional warning block appended to every created PR body when the token is
+# about to expire (opt-in via the token-expiry-warning-in-pr-body input;
+# TOKEN_DAYS_LEFT is empty for non-expiring tokens, which disables it too).
+# The same threshold as the workflow warning in check-token.sh.
+token_expiry_note=""
+if [ "${EXPIRY_WARNING_IN_PR_BODY:-false}" = "true" ] \
+    && [[ "${TOKEN_DAYS_LEFT:-}" =~ ^-?[0-9]+$ ]] \
+    && [[ "${WARNING_DAYS:-14}" =~ ^[0-9]+$ ]] \
+    && [ "$TOKEN_DAYS_LEFT" -lt "${WARNING_DAYS:-14}" ]; then
+  token_expiry_note="> [!WARNING]
+> The cherry-pick token expires on $TOKEN_EXPIRATION_DATE ($TOKEN_DAYS_LEFT days from now). Renew the fine-grained PAT and update the secret, otherwise the cherry-pick workflows will start failing.${ERROR_HINT:+ $ERROR_HINT}"
+fi
 
 error_count=0
 target_count=0
@@ -195,6 +214,8 @@ Cherry-picked PR #$PR_NUMBER to branch \`$target\`.
 The cherry-pick was **successful**.
 
 Please review the changes and **rebase-merge** if desired.
+
+$token_expiry_note
 EOF
     )"
   else
@@ -230,6 +251,8 @@ git push -f origin "HEAD:$cherry_pick_branch"
 \`\`\`
 
 After resolving all conflicts, **rebase-merge** this PR.
+
+$token_expiry_note
 EOF
     )"
   fi
