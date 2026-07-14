@@ -5,25 +5,24 @@ onto release / support branches, driven by labels on the pull request.
 
 **Why this action?**
 
-- **No target-branch configuration**: any label of the form
-  `cherry-pick-to-<branch>` works out of the box — the action discovers the
-  target branches from the merged PR's labels at run time. No whitelist to
-  maintain when a new release branch is created.
-- **A pull request is always created** once a labeled PR is merged. If the
-  cherry-pick succeeds, the PR is ready to review and merge; if it fails on
-  conflicts, a PR (optionally a draft) is created anyway, listing the conflicting files
-  and copy-paste instructions for resolving them manually on that same
-  branch. Nothing is ever silently dropped.
-- **Works with squash merges and rebase merges alike**: the whole pushed
-  commit range is cherry-picked, whether that is one squashed commit or many
-  commits from a rebase merge.
-- **CI can run on the created PRs**: pass a fine-grained PAT and the
-  cherry-pick PRs trigger your workflows like any human-created PR. (The
-  zero-setup default `GITHUB_TOKEN` works too, but cannot trigger workflows —
-  see [Token](#token).)
-- **Meaningful token diagnostics**: expired, misconfigured, or read-only
-  tokens fail with an actionable error before anything else happens, and the
-  action warns ahead of time when a PAT is about to expire.
+- **From pull request to pull request.** Label a PR
+  `cherry-pick-to-<branch>`, and when it merges (squash or rebase alike) a
+  review-ready PR appears on each target branch. The action **never commits
+  or merges to your release branches directly** — every backport goes
+  through the same review and merge process as any other change.
+- **A cherry-pick is never forgotten.** Even when it fails on conflicts, a
+  PR is still created (optionally as a draft): labeled as failed, listing
+  the conflicting files, with copy-paste instructions for resolving them on
+  that same branch. A conflict becomes a visible open PR to act on instead
+  of a silently missing backport.
+- **CI runs on the backport PRs.** Pass a fine-grained PAT and the created
+  PRs trigger your workflows like any human-opened PR. (The zero-setup
+  default `GITHUB_TOKEN` works too, but cannot trigger workflows — see
+  [Token](#token).)
+- **Token expiry won't surprise you.** The token is verified before anything
+  else, failures come with actionable messages instead of cryptic git
+  errors, and the action warns ahead of time when the PAT is about to
+  expire — optionally right in the PR bodies, where reviewers see it.
 
 ## How it works
 
